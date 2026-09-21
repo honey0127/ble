@@ -71,6 +71,7 @@ private const val CH_ALL_LABEL = 0         // ALL_CONTROL 모드 표식 (실제 
 
 private const val START_WINDOW_MS = 30_000L
 private const val START_LIMIT = 4          // 시스템 한도 5. 여유를 두고 4에서 막는다
+private const val FLUSH_INTERVAL_MS = 2_000L   // 수신이 드물어도 2초마다 디스크에 내린다
 
 enum class Mode { RAW, BEACON }
 
@@ -144,8 +145,11 @@ class Collector(private val ctx: Context) {
     private val stats = LinkedHashMap<Int, ChStat>()     // BEACON: channel_id, RAW: 고정 -1
     private var writer: BufferedWriter? = null
     private var file: File? = null
-    private var startedAtMs = 0L
+    private var startedAtMs = 0L            // 파일명·rx_wall_ms 용 벽시계
+    private var startedAtElapsed = 0L       // 경과·pkt/s 용 단조시계
+    private var endedAtElapsed = 0L         // 정지 시각. 0이면 진행 중
     private var pending = 0
+    private var lastFlushElapsed = 0L
     private var totalRows = 0L
 
     @Volatile var mode: Mode = Mode.RAW
@@ -170,7 +174,8 @@ class Collector(private val ctx: Context) {
         override fun onScanResult(callbackType: Int, result: ScanResult) = handle(result)
         override fun onBatchScanResults(results: MutableList<ScanResult>) = results.forEach(::handle)
         override fun onScanFailed(errorCode: Int) {
-            running = false
+            // 여기서 파일을 닫지 않으면 버퍼에 남은 행이 CSV 에 안 들어간다
+            finish()
             postNotice("스캔 실패 (errorCode=$errorCode). 블루투스를 껐다 켜고 다시 시도하세요.")
         }
     }
@@ -197,6 +202,9 @@ class Collector(private val ctx: Context) {
         synchronized(lock) {
             stats.clear(); totalRows = 0; pending = 0
             startedAtMs = System.currentTimeMillis()
+            startedAtElapsed = SystemClock.elapsedRealtime()
+            endedAtElapsed = 0L
+            lastFlushElapsed = startedAtElapsed
             val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(startedAtMs)
             val prefix = if (mode == Mode.BEACON) "beacon" else "raw"
             val dir = File(ctx.getExternalFilesDir(null), "ble_logs").apply { mkdirs() }
@@ -231,9 +239,14 @@ class Collector(private val ctx: Context) {
     }
 
     @SuppressLint("MissingPermission")
-    fun stop() {
+    fun stop() = finish()
+
+    /** 정상 정지와 스캔 실패가 같은 경로로 끝나게 한다. 두 번 불려도 안전하다. */
+    @SuppressLint("MissingPermission")
+    private fun finish() {
         if (!running) return
         running = false
+        synchronized(lock) { if (endedAtElapsed == 0L) endedAtElapsed = SystemClock.elapsedRealtime() }
         try { scanner?.stopScan(callback) } catch (_: SecurityException) {}
         closeWriter()
     }
@@ -250,7 +263,7 @@ class Collector(private val ctx: Context) {
     private fun handle(result: ScanResult) {
         if (!running) return
         val wall = System.currentTimeMillis()
-        val elapsed = wall - startedAtMs
+        val elapsed = SystemClock.elapsedRealtime() - startedAtElapsed
         val rssi = result.rssi
         val record = result.scanRecord
 
@@ -285,7 +298,13 @@ class Collector(private val ctx: Context) {
 
     private fun maybeFlush() {
         pending++
-        if (pending >= 200) { pending = 0; try { writer?.flush() } catch (_: Exception) {} }
+        val now = SystemClock.elapsedRealtime()
+        // 행 수만 보면 수신이 드문 구간에서 오래 안 써진다. 시간 조건을 같이 둔다
+        if (pending >= 200 || now - lastFlushElapsed >= FLUSH_INTERVAL_MS) {
+            pending = 0
+            lastFlushElapsed = now
+            try { writer?.flush() } catch (_: Exception) {}
+        }
     }
 
     private fun le32(b: ByteArray, off: Int): Long =
@@ -294,13 +313,18 @@ class Collector(private val ctx: Context) {
                 ((b[off + 2].toLong() and 0xFF) shl 16) or
                 ((b[off + 3].toLong() and 0xFF) shl 24)
 
-    private fun csv(s: String): String =
-        if (s.contains(',') || s.contains('"')) "\"" + s.replace("\"", "\"\"") + "\"" else s
+    private fun csv(s: String): String {
+        // BLE deviceName 에 개행이 들어오면 CSV 행이 둘로 쪼개진다. 먼저 없앤다
+        val t = s.replace('\n', ' ').replace('\r', ' ')
+        return if (t.contains(',') || t.contains('"')) "\"" + t.replace("\"", "\"\"") + "\"" else t
+    }
 
     /* ---------------- 화면용 스냅샷 ---------------- */
 
     fun snapshot(): UiState = synchronized(lock) {
-        val sec = if (startedAtMs == 0L) 0.0 else (System.currentTimeMillis() - startedAtMs) / 1000.0
+        // 정지 후에는 시간이 더 흐르지 않아야 한다. 안 그러면 pkt/s 가 계속 내려간다
+        val endE = if (endedAtElapsed > 0L) endedAtElapsed else SystemClock.elapsedRealtime()
+        val sec = if (startedAtElapsed == 0L) 0.0 else (endE - startedAtElapsed) / 1000.0
         val list = stats.entries.sortedBy { it.key }.map { (ch, s) ->
             StatRow(
                 label = when {
@@ -360,6 +384,12 @@ class MainActivity : ComponentActivity() {
         permGranted = hasPerms()
 
         setContent { MaterialTheme { Screen() } }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // 설정 화면에서 권한을 켜고 돌아왔을 때 버튼이 계속 막혀 있지 않게 한다
+        permGranted = hasPerms()
     }
 
     override fun onDestroy() {
@@ -491,7 +521,7 @@ class MainActivity : ComponentActivity() {
             Text(text, fontSize = 12.sp, color = Color(0xFF0F172A))
         }
 
-    @Composable privatwlrme fun Header() = Row(Modifier.fillMaxWidth()) {
+    @Composable private fun Header() = Row(Modifier.fillMaxWidth()) {
         listOf("ch" to 0.9f, "rows" to 1.2f, "pkt/s" to 1.1f, "mean" to 1.2f,
             "sd" to 1.0f, "seqObs" to 1.2f, "dup" to 0.9f, "lastSeq" to 1.3f, "back" to 0.8f)
             .forEach { (t, w) ->

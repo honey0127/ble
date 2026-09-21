@@ -22,7 +22,7 @@
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
-        android:label="BLE Channel Probe"
+        android:label="@string/app_name"
         android:supportsRtl="true">
 
         <!-- 플랫폼 기본 테마를 쓴다. 별도 라이브러리 의존이 없어 항상 빌드된다.
@@ -30,7 +30,7 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:label="BLE Channel Probe"
+            android:label="@string/app_name"
             android:screenOrientation="portrait"
             android:theme="@android:style/Theme.Material.Light.NoActionBar"
             tools:ignore="LockedOrientationActivity">

@@ -1,5 +1,7 @@
 plugins {
     alias(libs.plugins.android.application)
+    // 이게 없으면 Kotlin 소스가 컴파일 대상에 아예 안 들어간다
+    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.compose.compiler)
 }
 
@@ -36,6 +38,14 @@ android {
     }
     buildFeatures {
         compose = true
+    }
+}
+
+// Java 는 11 로 컴파일하는데 Kotlin 이 toolchain(21) 을 따라가면
+// "Inconsistent JVM-target compatibility" 로 빌드가 멈춘다. 명시해서 맞춘다.
+kotlin {
+    compilerOptions {
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11
     }
 }
 
