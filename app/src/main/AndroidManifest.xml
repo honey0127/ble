@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Android 12(API 31) 이상: 위치 권한 없이 스캔한다.
+         neverForLocation 을 선언하면 위치 권한도, 위치 서비스 ON 도 필요 없다. -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="s" />
+
+    <!-- Android 11(API 30) 이하 하위 호환.
+         이 구간에서는 ACCESS_FINE_LOCATION 과 '위치 서비스 켜짐'이 둘 다 있어야
+         BLE 스캔 결과가 나온다. Galaxy S25(Android 16)에서는 해당 없음. -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
+
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
+
+    <application
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="BLE Channel Probe"
+        android:supportsRtl="true">
+
+        <!-- 플랫폼 기본 테마를 쓴다. 별도 라이브러리 의존이 없어 항상 빌드된다.
+             (Theme.Material3.* 는 com.google.android.material 의존이 필요해서 쓰지 않는다) -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="BLE Channel Probe"
+            android:screenOrientation="portrait"
+            android:theme="@android:style/Theme.Material.Light.NoActionBar"
+            tools:ignore="LockedOrientationActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
