@@ -1,7 +1,7 @@
 plugins {
+    // AGP 9.x 는 Kotlin 지원이 내장돼 있어 kotlin-android 플러그인을 따로 적용하지 않는다.
+    // (따로 적용하면 "extension 'kotlin' already registered" 로 충돌한다)
     alias(libs.plugins.android.application)
-    // 이게 없으면 Kotlin 소스가 컴파일 대상에 아예 안 들어간다
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.compose.compiler)
 }
 
