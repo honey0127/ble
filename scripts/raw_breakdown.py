@@ -19,6 +19,11 @@ RAW CSV 기기별 분해 — pkt/s 급락이 수신기 쪽인지 환경 쪽인�
 패턴 B (환경 측):   일부 기기가 통째로 사라지고(=RPA 주소 교체 포함),
                      계속 잡히는 기기의 분당 수신량은 유지된다
                      → 주변 밀도 변화 쪽 원인
+
+분당 수신량은 '그 분에 실제로 기록된 시간'으로 나눈다. 기록은 보통 새 1분에
+몇 초만 걸친 채 끝나는데, 그 마지막 부분 분을 1분으로 세면 수신량이 거의 0 으로
+보여 자동 분할이 거기를 급락 지점으로 잘못 고르고, 분할 후 수신량도 낮게 잡혀
+배율이 부풀려진다. 30초 미만만 기록된 분은 자동 분할 후보에서 뺀다.
 """
 import sys
 import csv
@@ -47,22 +52,43 @@ def per_minute_counts(rows):
     return counts
 
 
+MIN_COVER_MIN = 0.5   # 자동 분할 후보가 되려면 그 분이 최소 30초는 기록돼 있어야 한다
+
+
+def end_minutes(rows):
+    """기록 끝 시각(분, 소수). 마지막 행의 rx_elapsed_ms 기준."""
+    return rows[-1]["el"] / 60000.0
+
+
+def coverage(rows, m):
+    """m 번째 분(m ~ m+1) 중 실제로 기록된 길이(분, 0~1). 마지막 부분 분만 1 보다 작다."""
+    return max(0.0, min(1.0, end_minutes(rows) - m))
+
+
 def auto_split(rows):
-    """전체 분당 수신량에서 낙폭(비율)이 가장 큰 경계를 분할 지점으로 삼는다."""
+    """분당 수신량(개수 ÷ 기록된 길이)의 낙폭 비율이 가장 큰 경계를 분할 지점으로 삼는다.
+    30초 미만만 기록된 분(보통 마지막 부분 분)은 후보에서 뺀다."""
     counts = per_minute_counts(rows)
     if not counts:
         return 0
     last_min = max(counts)
     best_min, best_drop = 1, -1.0
     for m in range(1, last_min + 1):
-        prev = counts.get(m - 1, 0)
-        cur = counts.get(m, 0)
+        if coverage(rows, m - 1) < MIN_COVER_MIN or coverage(rows, m) < MIN_COVER_MIN:
+            continue
+        prev = counts.get(m - 1, 0) / coverage(rows, m - 1)
+        cur = counts.get(m, 0) / coverage(rows, m)
         if prev == 0:
             continue
         drop = 1.0 - (cur / prev)
         if drop > best_drop:
             best_drop, best_min = drop, m
     return best_min
+
+
+def spans(rows, split_min):
+    """분할 전·후 구간의 실제 길이(분). 분할 후 길이는 기록 끝까지의 실제 시간이다."""
+    return float(split_min), end_minutes(rows) - split_min
 
 
 def breakdown(rows, split_min):
@@ -72,9 +98,10 @@ def breakdown(rows, split_min):
         m = r["el"] // 60000
         (pre if m < split_min else post)[r["addr"]] += 1
 
-    last_min = max(r["el"] // 60000 for r in rows)
-    pre_span = split_min
-    post_span = max(last_min - split_min + 1, 1)
+    pre_span, post_span = spans(rows, split_min)
+    if split_min <= 0 or post_span <= 0:
+        print(f"\n분할 지점 {split_min} 분이 기록 범위(0 ~ {end_minutes(rows):.2f} 분) 밖입니다.")
+        return
 
     pre_addrs = set(pre)
     post_addrs = set(post)
@@ -86,8 +113,8 @@ def breakdown(rows, split_min):
     post_total = sum(post.values())
 
     print(f"\n분할 지점         {split_min} 분")
-    print(f"분할 전 ({pre_span}분)     {pre_total} 행, 고유 주소 {len(pre_addrs)} 개")
-    print(f"분할 후 ({post_span}분)    {post_total} 행, 고유 주소 {len(post_addrs)} 개")
+    print(f"분할 전 ({pre_span:.2f}분)  {pre_total} 행, 고유 주소 {len(pre_addrs)} 개")
+    print(f"분할 후 ({post_span:.2f}분)  {post_total} 행, 고유 주소 {len(post_addrs)} 개")
     print(f"전체 낙폭          {pre_total/pre_span:.0f} → {post_total/post_span:.0f} pkt/min"
           f"  (x{(pre_total/pre_span)/(post_total/post_span) if post_total else float('inf'):.1f})")
 
@@ -142,15 +169,16 @@ def mac_filter(rows, split_min, mac_substr):
 
     pre = sum(1 for r in filtered if r["el"] // 60000 < split_min)
     post = sum(1 for r in filtered if r["el"] // 60000 >= split_min)
-    last_min = max(r["el"] // 60000 for r in rows)
-    pre_span = split_min
-    post_span = max(last_min - split_min + 1, 1)
+    pre_span, post_span = spans(rows, split_min)
+    if split_min <= 0 or post_span <= 0:
+        print(f"\n분할 지점 {split_min} 분이 기록 범위(0 ~ {end_minutes(rows):.2f} 분) 밖입니다.")
+        return
     pre_rate = pre / pre_span
     post_rate = post / post_span
 
-    print(f"분할 지점 {split_min} 분")
-    print(f"분할 전   {pre} 행 ({pre_rate:.1f} pkt/min)")
-    print(f"분할 후   {post} 행 ({post_rate:.1f} pkt/min)")
+    print(f"분할 지점 {split_min} 분   (기록 끝 {end_minutes(rows):.2f} 분)")
+    print(f"분할 전   {pre} 행 / {pre_span:.2f} 분 ({pre_rate:.1f} pkt/min)")
+    print(f"분할 후   {post} 행 / {post_span:.2f} 분 ({post_rate:.1f} pkt/min)")
 
     if post_rate == 0:
         print("\n분할 후 이 주소에서 수신이 전혀 없다 — 판정 불가 (기기가 꺼졌거나 이동했을 수 있다).")
