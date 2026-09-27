@@ -63,10 +63,17 @@ Phase 0 측정에는 지장이 없다.
 내장저장소/Android/data/com.knu.blechprobe/files/ble_logs/
 ```
 
-| 모드 | 파일명 | 컬럼 |
-|---|---|---|
-| BEACON | `beacon_<yyyyMMdd_HHmmss>.csv` | `rx_wall_ms,rx_elapsed_ms,beacon_id,channel_id,seq,rssi,tx_uptime_ms,tx_power_dbm,tag` |
-| RAW | `raw_<yyyyMMdd_HHmmss>.csv` | `rx_wall_ms,rx_elapsed_ms,address,rssi,name,tag` |
+측정 1회에 파일이 **2개** 생긴다. 같은 `<stamp>` 로 짝을 맞춘다.
+
+| 파일 | 컬럼 |
+|---|---|
+| `beacon_<stamp>.csv` | `rx_wall_ms,rx_elapsed_ms,beacon_id,channel_id,seq,rssi,tx_uptime_ms,tx_power_dbm,tag,ts_nanos,address` |
+| `raw_<stamp>.csv` | `rx_wall_ms,rx_elapsed_ms,address,rssi,name,tag,ts_nanos` |
+| `events_<stamp>.csv` | 폰 상태 이벤트 로그 (→ 4.1) |
+
+`<stamp>` 는 `yyyyMMdd_HHmmss`. 9/27 에 `ts_nanos`(두 파일)와 `address`(BEACON)를
+**맨 끝에** 추가했다. `scripts/` 의 분석 스크립트는 `DictReader` 로 이름을 읽으므로
+이전 CSV 와 섞어 써도 깨지지 않는다.
 
 - `rx_wall_ms` — 수신 시각, 벽시계 epoch ms. 파일·세션 간 정렬용
 - `rx_elapsed_ms` — 측정 시작부터의 경과 ms. **단조시계**(`elapsedRealtime`) 기준이라
@@ -74,6 +81,12 @@ Phase 0 측정에는 지장이 없다.
 - `channel_id` — 비콘이 적어 보낸 라벨. `37|38|39`, 그리고 `0 = ALL_CONTROL`
   (모드 표식이며 RF 채널 아님. 화면에는 `ALL*` 로 표시)
 - `tag` — 실험 조건 문자열. **비어 있으면 앱이 시작을 거부한다**
+- `ts_nanos` — `ScanResult.getTimestampNanos()`. 컨트롤러가 패킷을 **관측한 시각**,
+  부팅 후 ns (`elapsedRealtimeNanos` 와 같은 시계, 수면 시간 포함).
+  `rx_elapsed_ms` 는 콜백이 불린 시각이라 전달 지연이 더해져 있다.
+  패킷 간격·M4(채널 전환 소요 시간) 분석은 이 컬럼으로 한다
+- `address` (BEACON) — 송신 MAC. T4c 에서 nRF Sniffer 캡처와 대조하고,
+  비콘이 여러 대가 되면 `beacon_id` 와 교차 확인하는 데 쓴다
 
 화면 지표 정의:
 
@@ -84,6 +97,56 @@ Phase 0 측정에는 지장이 없다.
 | `seqObs%` | `고유 seq ÷ (max−min+1)` | 연속성. 100% 를 넘을 수 없다 |
 | `dup` | `rows ÷ 고유 seq` | 타이밍 진단값 |
 | `back` | seq 역행 횟수 | 0 이 아니면 T2 확인 대상 |
+| `events` | 이벤트 로그 행 수 | 10초마다 최소 1씩 늘어야 정상 |
+
+### 4.1 이벤트 로그 `events_<stamp>.csv`
+
+처리량이 꺾인 순간 폰이 어떤 상태였는지 남긴다. 9/22 1차 측정에서 5분 지점 급락의
+원인을 추정밖에 못 한 이유가 이 기록이 없어서였다.
+
+**모든 행에 그 순간의 상태 스냅샷이 같이 붙는다.** 방송(broadcast)을 놓치거나 늦게
+받아도 다음 `tick` 이 현재 값을 직접 다시 읽어 적는다.
+
+| 컬럼 | 뜻 |
+|---|---|
+| `rx_wall_ms`, `rx_elapsed_ms` | 데이터 CSV 와 같은 기준. `rx_elapsed_ms` 로 두 파일을 바로 맞댈 수 있다 |
+| `ts_nanos` | 기록 시각, `elapsedRealtimeNanos`. 데이터 CSV 의 `ts_nanos` 와 **같은 시계** |
+| `event`, `value` | 무슨 일이 있었나 (아래 표) |
+| `rows` | 그 시점의 누적 수신 행 수 |
+| `screen_on` | 1/0 (`PowerManager.isInteractive`) |
+| `activity` | 마지막 Activity 생명주기 (`onResume`, `onPause`, `onStop` …) |
+| `importance` | 시스템이 보는 프로세스 중요도. 100=foreground, 125=foreground service, 200=visible, 325=top sleeping, 400=cached |
+| `power_save` | 절전 모드 1/0 |
+| `doze` | `off` / `light` (API 33+) / `deep` |
+| `plugged` | `none` / `ac` / `usb` / `wireless` |
+| `batt_pct`, `batt_temp_c` | 배터리 잔량 %, 배터리 온도 °C |
+| `thermal` | `getCurrentThermalStatus` 0=NONE … 3=SEVERE … 6=SHUTDOWN (API 29+) |
+| `headroom` | `getThermalHeadroom(0)`. 1.0 = SEVERE 스로틀 도달. **`tick` 행에만** 있다 (API 30+) |
+| `bt` | 블루투스 어댑터 `on` / `off` / `turning_on` / `turning_off` |
+| `detail` | 이벤트별 부가 정보 |
+| `tag` | 데이터 CSV 와 같은 tag |
+
+| `event` | `value` | 언제 |
+|---|---|---|
+| `session_start` | `RAW`/`BEACON` | 측정 시작. `detail` 에 파일명·기종·SDK·스캔 설정·`batt_opt_exempt`(6장 3번이 실제로 적용됐는지) |
+| `tick` | | 10초마다. `rows` 차이 = 10초 처리량 |
+| `activity` | `onCreate` … `onDestroy` | Activity 생명주기. `onCreate` 의 `detail` 에 `recreated`·`night`·`fontScale`. `onDestroy` 행은 설정 변경 재생성일 때만 남는다(`changingConfig=1`) — 정말 끝날 때는 ViewModel 이 먼저 정리돼 `session_stop vm_cleared` 가 마지막 행이 된다 |
+| `screen` | `on`/`off` | 화면 켜짐·꺼짐 |
+| `power_save` | 1/0 | 절전 모드 변경 |
+| `doze` | `off`/`light`/`deep` | Doze 진입·해제 |
+| `charging` | `connected`/`disconnected` | 충전기 연결·분리 |
+| `bt` | 어댑터 상태 | 블루투스 켜짐·꺼짐 |
+| `thermal` | 0–6 | 발열 상태 변경 (API 29+) |
+| `scan_failed` | errorCode | `onScanFailed` |
+| `session_stop` | `user`/`scan_failed`/`vm_cleared` | 측정 종료 이유 |
+
+읽을 때 주의:
+
+- **이벤트 시각은 "앱이 알게 된 시각"이다.** Android 14+ 는 cached 상태 앱에
+  `SCREEN_ON` 같은 방송을 미뤘다가 준다 (developer.android.com, Broadcasts overview)
+- **`tick` 간격이 10초보다 크게 벌어지면 그 구간에서 앱 자체가 멈춰 있었다는 뜻이다.**
+  그 자체가 증거다
+- 화면이 켜져 있으면 Doze 는 걸리지 않는다. `doze` 는 "안 걸렸다"를 확인하는 용도다
 
 ---
 
@@ -106,20 +169,29 @@ RAW 모드는 주변 아무 BLE 기기나 잡아서 쌓는다. 앱 자체 검증
 0인 분은 없었지만 5분 지점에서 분당 수신량이 약 30배 급락했다 — 콜백은
 살아 있었지만 사실상 다른 조건으로 측정 구간이 갈린 것이다. 검증 절차:
 
-1. `scripts/raw_check.py <csv>` — 0인 분이 있는지, 즉 콜백이 죽었는지만 본다
+1. `scripts/raw_check.py <csv>` — 0인 분이 있는지, 즉 콜백이 죽었는지만 본다.
+   **통과 판정이 아니다**
 2. `scripts/raw_breakdown.py <csv>` — 분당 수신량이 중간에 꺾이면, 기기별로
    갈라서 수신기 측(듀티사이클 강등 등) 원인인지 환경 측(주변 기기 밀도
    변화)인지 정황을 본다. **표본이 희박한 구간(분당 수신량이 원래의
    1/10 이하)에서는 기기별 배율 판정 자체가 잡음에 취약하니 정황 이상으로
    읽지 않는다**
-3. 확정은 고정 주소 기기(ESP32 등)로만 한다 —
+3. 꺾인 시각을 `events_<stamp>.csv` 와 맞댄다 — `tick` 행의 `rows` 차이로
+   10초 단위 처리량을 보고, 꺾이기 직전·직후 행의 상태 열(`screen_on`,
+   `activity`, `importance`, `power_save`, `doze`, `plugged`, `thermal`,
+   `headroom`, `bt`)이 바뀌었는지 본다. 아무것도 안 바뀌었는데 꺾였다면
+   그것도 결과다 — 이 로그가 잡지 못하는 원인(제조사 스캔 정책 등) 쪽이다
+4. 확정은 고정 주소 기기(ESP32 등)로만 한다 —
    `scripts/raw_breakdown.py <csv> <분할분> <MAC일부>`. RPA 를 쓰는
    일반 스마트폰 주소는 "소멸/신규"가 실제 이동이 아니라 주소 교체일 수
    있어 결정적 근거가 못 된다
 
-A3 는 현재 **미검증**이다. 재측정은 화면/포그라운드 상태를 CSV 에 같이
-남기도록 설계해야 한다 — 그렇지 않으면 다음 번에도 원인 추정만 반복하게
-된다.
+A3 는 현재 **미검증**이다. 재측정부터는 앱이 상태를 `events_<stamp>.csv` 에
+같이 남긴다 (4.1). 원인 후보와 진행 상황은 [`STATUS.md`](STATUS.md) 에 있다.
+
+재측정 중에 다크모드 자동 전환이나 글꼴 크기 변경이 일어나도 측정은 끊기지 않는다.
+측정기가 Activity 가 아니라 ViewModel 에 있어서다. 그런 일이 있었다면 이벤트 로그에
+`activity onDestroy changingConfig=1` → `onCreate recreated=1` 로 남는다.
 
 ### 스캔 재시작 제한
 
@@ -158,9 +230,11 @@ Galaxy / One UI 기준이다. 버전에 따라 메뉴 이름이 조금씩 다르
 
 ## 8. 알려진 한계
 
-- **컴파일 검증 안 됨.** 이 저장소를 만든 환경에 Android SDK 가 없어 `assembleDebug` 를
-  돌리지 못했다. 코드 검토로만 확인했다. 빌드 에러가 나면 메시지 그대로 알려주면 된다.
-  Compose BOM 버전이 다르면 `HorizontalDivider` / `FilterChip` 쪽이 제일 먼저 깨진다
+- **빌드:** 커밋 `79bd045` 기준으로 실기기에서 `assembleDebug` 와 실행을 확인했다.
+  9/27 의 이벤트 로그·ViewModel·`ts_nanos`·`address` 변경은 **아직 실기기 빌드 전**이다.
+  작업 환경에 Android SDK 가 없어, API 36 프레임워크(Robolectric `android-all`)와
+  Compose 공통 API 에 대해 Kotlin 컴파일 검사만 통과시켰다. AndroidX
+  activity/lifecycle/core 는 공개 시그니처를 옮긴 스텁으로 대신했다
 - 화면을 켠 채 측정한다. 포그라운드 서비스가 없어 장시간 백그라운드 수집은 못 한다
 - `channel_id` 는 라벨이다. 실제 RF 채널 확정은 T4c (nRF Sniffer) 로만 한다
 - RAW 모드는 `seq` 가 없으므로 `seqObs% / dup / back` 이 의미 없다 (`-` 로 표시)

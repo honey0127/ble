@@ -14,6 +14,15 @@ package com.knu.blechprobe
  *        30초에 startScan 5회를 넘기면 시스템이 조용히 결과를 끊기 때문이다.
  *        (Android 공식 문서에 명시된 제한. 앱은 4회에서 미리 막는다)
  *
+ * 출력 — 측정 1회에 파일 2개, 같은 stamp
+ *   raw_<stamp>.csv / beacon_<stamp>.csv   수신 패킷
+ *   events_<stamp>.csv                     폰 상태 이벤트 + 10초 tick
+ *     처리량이 꺾인 순간 화면·Activity·절전·Doze·충전·발열·BT 가 어땠는지 남긴다.
+ *     9/22 A3 1차 측정에서 5분 지점 급락의 원인을 추정밖에 못 한 이유가 이 기록의 부재다.
+ *
+ * 측정기(Collector)는 ViewModel 에 둔다. 다크모드·글꼴 크기 변경으로 Activity 가
+ * 다시 만들어져도 측정이 끊기지 않는다. Activity 가 정말 끝날 때만 정지한다.
+ *
  * 지표 정의 — README 와 analyze.py 에 맞춘다
  *   rows     수신 행 수 (같은 seq 중복 포함)
  *   pkt/s    rows ÷ 경과초.  가정 없는 직접 측정값. 조건 비교는 이 값으로
@@ -23,16 +32,26 @@ package com.knu.blechprobe
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.ActivityManager
+import android.app.Application
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.PowerManager
 import android.os.SystemClock
 import android.view.WindowManager
 import android.widget.Toast
@@ -54,9 +73,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ViewModelProvider
 import java.io.BufferedWriter
 import java.io.File
 import java.io.FileWriter
+import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.ArrayDeque
 import java.util.Locale
@@ -72,8 +94,18 @@ private const val CH_ALL_LABEL = 0         // ALL_CONTROL 모드 표식 (실제 
 private const val START_WINDOW_MS = 30_000L
 private const val START_LIMIT = 4          // 시스템 한도 5. 여유를 두고 4에서 막는다
 private const val FLUSH_INTERVAL_MS = 2_000L   // 수신이 드물어도 2초마다 디스크에 내린다
+private const val TICK_MS = 10_000L            // 이벤트 로그에 누적 rows·상태를 다시 적는 주기
+
+/* 이벤트 CSV 헤더. 가운데 screen_on..bt 는 PhoneState.row() 가 같은 순서로 채운다 */
+private const val EVENT_HEADER =
+    "rx_wall_ms,rx_elapsed_ms,ts_nanos,event,value,rows," +
+        "screen_on,activity,importance,power_save,doze,plugged,batt_pct,batt_temp_c," +
+        "thermal,headroom,bt," +
+        "detail,tag"
 
 enum class Mode { RAW, BEACON }
+
+private fun bit(v: Boolean) = if (v) "1" else "0"
 
 /* --------------------------- 채널별 통계 --------------------------- */
 
@@ -128,10 +160,91 @@ data class UiState(
     val mode: Mode = Mode.RAW,
     val elapsedSec: Double = 0.0,
     val totalRows: Long = 0,
+    val eventRows: Long = 0,
     val fileName: String = "-",
     val rows: List<StatRow> = emptyList(),
     val notice: String = "",
 )
+
+/* -------------------------- 폰 상태 스냅샷 -------------------------- */
+
+/**
+ * 이벤트 CSV 의 모든 행에 붙는 "그 순간의 폰 상태".
+ * 방송(broadcast)을 놓치거나 늦게 받아도 다음 tick 이 현재 값을 직접 읽어 다시 적는다.
+ * (Android 14+ 는 cached 상태 앱에 SCREEN_ON 같은 방송을 미뤘다가 준다)
+ */
+private class PhoneState(private val ctx: Context) {
+    private val pm = ctx.getSystemService(Context.POWER_SERVICE) as PowerManager
+    private val adapter: BluetoothAdapter? =
+        (ctx.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
+
+    /**
+     * EVENT_HEADER 의 screen_on..bt 순서로 채운 CSV 조각.
+     * headroom 은 초당 1회보다 자주 부르면 NaN 이 나올 수 있어 tick 에서만 읽는다.
+     */
+    fun row(activity: String, withHeadroom: Boolean): String {
+        // sticky 방송이라 수신기 없이 현재 값만 읽힌다 (공식 문서의 배터리 상태 읽기 방식)
+        val batt = ctx.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val level = batt?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = batt?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+        val temp = batt?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Int.MIN_VALUE) ?: Int.MIN_VALUE
+        val plugged = batt?.getIntExtra(BatteryManager.EXTRA_PLUGGED, -1) ?: -1
+
+        // 시스템이 보는 이 프로세스의 중요도. 100=foreground, 125=foreground service, 400=cached
+        val proc = ActivityManager.RunningAppProcessInfo().also { ActivityManager.getMyMemoryState(it) }
+
+        val thermal = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            pm.currentThermalStatus.toString()
+        } else ""
+        val headroom = if (withHeadroom && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val h = pm.getThermalHeadroom(0)
+            if (h.isNaN()) "" else String.format(Locale.US, "%.3f", h)
+        } else ""
+
+        return listOf(
+            bit(pm.isInteractive),
+            activity,
+            proc.importance.toString(),
+            powerSave(),
+            doze(),
+            plugName(plugged),
+            if (level >= 0 && scale > 0) (100 * level / scale).toString() else "",
+            if (temp != Int.MIN_VALUE) String.format(Locale.US, "%.1f", temp / 10.0) else "",
+            thermal,
+            headroom,
+            btName(adapter?.state),
+        ).joinToString(",")
+    }
+
+    fun powerSave(): String = bit(pm.isPowerSaveMode)
+
+    fun doze(): String = when {
+        pm.isDeviceIdleMode -> "deep"
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && pm.isDeviceLightIdleMode -> "light"
+        else -> "off"
+    }
+
+    /** 앱별 배터리 '제한 없음' 이면 1 (README 6장 3번이 실제로 적용됐는지) */
+    fun battOptExempt(): String = bit(pm.isIgnoringBatteryOptimizations(ctx.packageName))
+
+    private fun plugName(p: Int) = when (p) {
+        -1 -> ""
+        0 -> "none"
+        BatteryManager.BATTERY_PLUGGED_AC -> "ac"
+        BatteryManager.BATTERY_PLUGGED_USB -> "usb"
+        BatteryManager.BATTERY_PLUGGED_WIRELESS -> "wireless"
+        else -> "other$p"                   // 8 = dock (API 33+)
+    }
+}
+
+private fun btName(state: Int?) = when (state) {
+    BluetoothAdapter.STATE_ON -> "on"
+    BluetoothAdapter.STATE_OFF -> "off"
+    BluetoothAdapter.STATE_TURNING_ON -> "turning_on"
+    BluetoothAdapter.STATE_TURNING_OFF -> "turning_off"
+    null -> "none"
+    else -> "unknown$state"
+}
 
 /* ------------------------------ 수집기 ------------------------------ */
 
@@ -140,26 +253,36 @@ class Collector(private val ctx: Context) {
     private val adapter: BluetoothAdapter? =
         (ctx.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
     private var scanner: BluetoothLeScanner? = null
+    private val pm = ctx.getSystemService(Context.POWER_SERVICE) as PowerManager
+    private val phone = PhoneState(ctx)
+    private val main = Handler(Looper.getMainLooper())
 
     private val lock = Any()
     private val stats = LinkedHashMap<Int, ChStat>()     // BEACON: channel_id, RAW: 고정 -1
     private var writer: BufferedWriter? = null
     private var file: File? = null
+    private var eventWriter: BufferedWriter? = null
+    private var eventFile: File? = null
     private var startedAtMs = 0L            // 파일명·rx_wall_ms 용 벽시계
     private var startedAtElapsed = 0L       // 경과·pkt/s 용 단조시계
     private var endedAtElapsed = 0L         // 정지 시각. 0이면 진행 중
     private var pending = 0
     private var lastFlushElapsed = 0L
     private var totalRows = 0L
+    private var eventRows = 0L
 
     @Volatile var mode: Mode = Mode.RAW
     @Volatile var tag: String = ""
     @Volatile var running = false
         private set
 
+    /** 마지막으로 알려진 Activity 생명주기. 이벤트 행마다 같이 적힌다 */
+    @Volatile private var activityState = "-"
+
     private val startTimes = ArrayDeque<Long>()
 
     val fileName: String get() = file?.name ?: "-"
+    val eventFileName: String get() = eventFile?.name ?: "-"
 
     /** 남은 startScan 여유 횟수. 0이면 지금 시작하면 안 된다. */
     fun startBudget(): Int {
@@ -174,8 +297,9 @@ class Collector(private val ctx: Context) {
         override fun onScanResult(callbackType: Int, result: ScanResult) = handle(result)
         override fun onBatchScanResults(results: MutableList<ScanResult>) = results.forEach(::handle)
         override fun onScanFailed(errorCode: Int) {
+            logEvent("scan_failed", errorCode.toString())
             // 여기서 파일을 닫지 않으면 버퍼에 남은 행이 CSV 에 안 들어간다
-            finish()
+            finish("scan_failed")
             postNotice("스캔 실패 (errorCode=$errorCode). 블루투스를 껐다 켜고 다시 시도하세요.")
         }
     }
@@ -200,7 +324,7 @@ class Collector(private val ctx: Context) {
         if (scanner == null) { postNotice("BluetoothLeScanner 를 얻지 못했습니다."); return false }
 
         synchronized(lock) {
-            stats.clear(); totalRows = 0; pending = 0
+            stats.clear(); totalRows = 0; pending = 0; eventRows = 0
             startedAtMs = System.currentTimeMillis()
             startedAtElapsed = SystemClock.elapsedRealtime()
             endedAtElapsed = 0L
@@ -210,12 +334,15 @@ class Collector(private val ctx: Context) {
             val dir = File(ctx.getExternalFilesDir(null), "ble_logs").apply { mkdirs() }
             file = File(dir, "${prefix}_$stamp.csv")
             writer = BufferedWriter(FileWriter(file!!))
+            // 새 컬럼(ts_nanos, address)은 맨 끝에 붙인다. 분석 스크립트는 이름으로 읽어서 영향이 없다
             writer!!.write(
                 if (mode == Mode.BEACON)
-                    "rx_wall_ms,rx_elapsed_ms,beacon_id,channel_id,seq,rssi,tx_uptime_ms,tx_power_dbm,tag\n"
+                    "rx_wall_ms,rx_elapsed_ms,beacon_id,channel_id,seq,rssi,tx_uptime_ms,tx_power_dbm,tag,ts_nanos,address\n"
                 else
-                    "rx_wall_ms,rx_elapsed_ms,address,rssi,name,tag\n"
+                    "rx_wall_ms,rx_elapsed_ms,address,rssi,name,tag,ts_nanos\n"
             )
+            eventFile = File(dir, "events_$stamp.csv")
+            eventWriter = BufferedWriter(FileWriter(eventFile!!)).apply { write(EVENT_HEADER + "\n") }
         }
 
         // 필터 없이 스캔한다. 모드는 기록 대상만 바꾼다 (재시작 금지)
@@ -226,35 +353,135 @@ class Collector(private val ctx: Context) {
             .apply { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) setLegacy(true) }
             .build()
 
-        return try {
+        try {
             scanner!!.startScan(null, settings, callback)
-            startTimes.addLast(SystemClock.elapsedRealtime())
-            running = true
-            true
         } catch (e: SecurityException) {
             postNotice("권한이 없습니다: ${e.message}")
-            closeWriter()
-            false
+            closeWriters()
+            return false
+        }
+        startTimes.addLast(SystemClock.elapsedRealtime())
+        running = true
+
+        logEvent(
+            "session_start", mode.name,
+            "file=${file?.name} maker=${Build.MANUFACTURER} model=${Build.MODEL} " +
+                "sdk=${Build.VERSION.SDK_INT} scan=LOW_LATENCY/legacy/no_filter " +
+                "batt_opt_exempt=${phone.battOptExempt()}"
+        )
+        registerMonitors()
+        return true
+    }
+
+    @SuppressLint("MissingPermission")
+    fun stop(reason: String = "user") = finish(reason)
+
+    /** 정상 정지·스캔 실패·ViewModel 정리가 같은 경로로 끝나게 한다. 두 번 불려도 안전하다. */
+    @SuppressLint("MissingPermission")
+    private fun finish(reason: String) {
+        if (!running) return
+        running = false
+        unregisterMonitors()
+        try { scanner?.stopScan(callback) } catch (_: SecurityException) {}
+        synchronized(lock) { if (endedAtElapsed == 0L) endedAtElapsed = SystemClock.elapsedRealtime() }
+        logEvent("session_stop", reason)
+        closeWriters()
+    }
+
+    private fun closeWriters() {
+        synchronized(lock) {
+            try { writer?.flush(); writer?.close() } catch (_: Exception) {}
+            try { eventWriter?.flush(); eventWriter?.close() } catch (_: Exception) {}
+            writer = null
+            eventWriter = null
         }
     }
 
-    @SuppressLint("MissingPermission")
-    fun stop() = finish()
+    /* ---------------- 상태 이벤트 로그 ---------------- */
 
-    /** 정상 정지와 스캔 실패가 같은 경로로 끝나게 한다. 두 번 불려도 안전하다. */
-    @SuppressLint("MissingPermission")
-    private fun finish() {
-        if (!running) return
-        running = false
-        synchronized(lock) { if (endedAtElapsed == 0L) endedAtElapsed = SystemClock.elapsedRealtime() }
-        try { scanner?.stopScan(callback) } catch (_: SecurityException) {}
-        closeWriter()
+    /** Activity 생명주기를 남긴다. 측정 중이 아닐 때는 상태 값만 갱신된다 */
+    fun onActivity(state: String, detail: String = "") {
+        activityState = state
+        logEvent("activity", state, detail)
     }
 
-    private fun closeWriter() {
+    private val stateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent) {
+            when (i.action) {
+                Intent.ACTION_SCREEN_ON -> logEvent("screen", "on")
+                Intent.ACTION_SCREEN_OFF -> logEvent("screen", "off")
+                PowerManager.ACTION_POWER_SAVE_MODE_CHANGED -> logEvent("power_save", phone.powerSave())
+                PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED,
+                PowerManager.ACTION_DEVICE_LIGHT_IDLE_MODE_CHANGED -> logEvent("doze", phone.doze())
+                Intent.ACTION_POWER_CONNECTED -> logEvent("charging", "connected")
+                Intent.ACTION_POWER_DISCONNECTED -> logEvent("charging", "disconnected")
+                BluetoothAdapter.ACTION_STATE_CHANGED -> logEvent(
+                    "bt", btName(i.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR))
+                )
+            }
+        }
+    }
+
+    private var thermalListener: PowerManager.OnThermalStatusChangedListener? = null
+
+    /** 10초마다 누적 rows 와 상태를 다시 적는다. 간격이 10초보다 크게 벌어지면 그동안 앱이 멈춰 있었다는 뜻 */
+    private val tick = object : Runnable {
+        override fun run() {
+            if (!running) return
+            logEvent("tick", withHeadroom = true)
+            main.postDelayed(this, TICK_MS)
+        }
+    }
+
+    private fun registerMonitors() {
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)
+            addAction(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                addAction(PowerManager.ACTION_DEVICE_LIGHT_IDLE_MODE_CHANGED)
+            }
+            addAction(Intent.ACTION_POWER_CONNECTED)
+            addAction(Intent.ACTION_POWER_DISCONNECTED)
+            addAction(BluetoothAdapter.ACTION_STATE_CHANGED)
+        }
+        // EXPORTED 로 등록한다. 블루투스 상태 방송은 system UID 가 아닌 특권 앱이 보내므로
+        // NOT_EXPORTED 수신기에는 오지 않는다 (developer.android.com 'Broadcasts overview').
+        // 위 액션은 전부 보호된(protected) 시스템 방송이라 다른 앱이 흉내 낼 수 없다.
+        ContextCompat.registerReceiver(ctx, stateReceiver, filter, ContextCompat.RECEIVER_EXPORTED)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val l = PowerManager.OnThermalStatusChangedListener { s -> logEvent("thermal", s.toString()) }
+            pm.addThermalStatusListener(l)      // 콜백은 메인 스레드로 온다
+            thermalListener = l
+        }
+        main.postDelayed(tick, TICK_MS)
+    }
+
+    private fun unregisterMonitors() {
+        main.removeCallbacks(tick)
+        try { ctx.unregisterReceiver(stateReceiver) } catch (_: IllegalArgumentException) {}
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            thermalListener?.let { pm.removeThermalStatusListener(it) }
+        }
+        thermalListener = null
+    }
+
+    /** events_<stamp>.csv 에 한 행. 측정 중이 아니면(파일이 없으면) 아무것도 하지 않는다 */
+    private fun logEvent(event: String, value: String = "", detail: String = "", withHeadroom: Boolean = false) {
+        if (eventWriter == null) return
+        val wall = System.currentTimeMillis()
+        val nanos = SystemClock.elapsedRealtimeNanos()      // 데이터 CSV 의 ts_nanos 와 같은 시계
+        val state = phone.row(activityState, withHeadroom)  // 시스템 서비스 호출이라 잠금 밖에서 읽는다
         synchronized(lock) {
-            try { writer?.flush(); writer?.close() } catch (_: Exception) {}
-            writer = null
+            val w = eventWriter ?: return
+            val elapsed = nanos / 1_000_000 - startedAtElapsed
+            try {
+                w.write("$wall,$elapsed,$nanos,$event,${csv(value)},$totalRows,$state,${csv(detail)},${csv(tag)}\n")
+                w.flush()           // 드물게 쓰이니 매번 내린다. 앱이 죽어도 직전 상태까지 남는다
+                eventRows++
+            } catch (_: IOException) {}
         }
     }
 
@@ -264,8 +491,11 @@ class Collector(private val ctx: Context) {
         if (!running) return
         val wall = System.currentTimeMillis()
         val elapsed = SystemClock.elapsedRealtime() - startedAtElapsed
+        // 콜백이 불린 시각이 아니라 컨트롤러가 패킷을 관측한 시각. 부팅 후 ns (전달 지연이 빠져 있다)
+        val tsNanos = result.timestampNanos
         val rssi = result.rssi
         val record = result.scanRecord
+        val addr = result.device?.address ?: "??"
 
         if (mode == Mode.BEACON) {
             val mfg = record?.getManufacturerSpecificData(COMPANY_ID) ?: return
@@ -281,16 +511,17 @@ class Collector(private val ctx: Context) {
             synchronized(lock) {
                 stats.getOrPut(channelId) { ChStat() }.add(rssi, seq)
                 totalRows++
-                writer?.write("$wall,$elapsed,$beaconId,$channelId,$seq,$rssi,$uptime,$txPower,${csv(tag)}\n")
+                writer?.write(
+                    "$wall,$elapsed,$beaconId,$channelId,$seq,$rssi,$uptime,$txPower,${csv(tag)},$tsNanos,$addr\n"
+                )
                 maybeFlush()
             }
         } else {
-            val addr = result.device?.address ?: "??"
             val name = try { record?.deviceName ?: "" } catch (_: SecurityException) { "" }
             synchronized(lock) {
                 stats.getOrPut(-1) { ChStat() }.add(rssi, -1)
                 totalRows++
-                writer?.write("$wall,$elapsed,$addr,$rssi,${csv(name)},${csv(tag)}\n")
+                writer?.write("$wall,$elapsed,$addr,$rssi,${csv(name)},${csv(tag)},$tsNanos\n")
                 maybeFlush()
             }
         }
@@ -341,8 +572,24 @@ class Collector(private val ctx: Context) {
         }
         UiState(
             running = running, mode = mode, elapsedSec = sec, totalRows = totalRows,
-            fileName = fileName, rows = list,
+            eventRows = eventRows, fileName = fileName, rows = list,
         )
+    }
+}
+
+/* ------------------------------ ViewModel ------------------------------ */
+
+/**
+ * 측정기를 Activity 밖에 둔다.
+ * 다크모드 자동 전환·글꼴 크기 변경 같은 설정 변경이 일어나면 Activity 는 다시 만들어지지만
+ * ViewModel 은 살아남는다. 그래서 10분 측정(T5) 중에 설정이 바뀌어도 CSV 가 닫히지 않는다.
+ * onCleared 는 Activity 가 정말 끝날 때(뒤로 가기 등)만 불리고, 설정 변경 때는 불리지 않는다.
+ */
+class CollectorViewModel(app: Application) : AndroidViewModel(app) {
+    val collector = Collector(app)
+
+    override fun onCleared() {
+        collector.stop("vm_cleared")
     }
 }
 
@@ -380,28 +627,60 @@ class MainActivity : ComponentActivity() {
         // 화면이 꺼지면 필터 없는 스캔이 멈출 수 있다. Phase 0 은 화면을 켠 채 측정한다.
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        collector = Collector(applicationContext)
+        // 설정 변경으로 다시 만들어진 Activity 도 같은 측정기를 받는다
+        collector = ViewModelProvider(this)[CollectorViewModel::class.java].collector
         permGranted = hasPerms()
 
+        // 무엇이 재생성을 일으켰는지 가를 수 있게 다크모드·글꼴 배율을 같이 남긴다
+        val cfg = resources.configuration
+        val night = (cfg.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+        collector.onActivity(
+            "onCreate",
+            "recreated=${bit(savedInstanceState != null)} night=${bit(night)} " +
+                "fontScale=${String.format(Locale.US, "%.2f", cfg.fontScale)}"
+        )
+
         setContent { MaterialTheme { Screen() } }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        collector.onActivity("onStart")
     }
 
     override fun onResume() {
         super.onResume()
         // 설정 화면에서 권한을 켜고 돌아왔을 때 버튼이 계속 막혀 있지 않게 한다
         permGranted = hasPerms()
+        collector.onActivity("onResume")
+    }
+
+    override fun onPause() {
+        collector.onActivity("onPause")
+        super.onPause()
+    }
+
+    override fun onStop() {
+        collector.onActivity("onStop")
+        super.onStop()
     }
 
     override fun onDestroy() {
-        collector.stop()
+        // 여기서 정지하지 않는다. 정지는 CollectorViewModel.onCleared 가 맡는다.
+        // 설정 변경(isChangingConfigurations)으로 다시 만들어질 때는 측정이 그대로 이어진다.
+        collector.onActivity(
+            "onDestroy",
+            "finishing=${bit(isFinishing)} changingConfig=${bit(isChangingConfigurations)}"
+        )
         super.onDestroy()
     }
 
     @Composable
     private fun Screen() {
-        var ui by remember { mutableStateOf(UiState()) }
-        var tag by remember { mutableStateOf("") }
-        var mode by remember { mutableStateOf(Mode.RAW) }
+        var ui by remember { mutableStateOf(collector.snapshot()) }
+        // Activity 가 다시 만들어져도 입력값은 측정기(ViewModel 쪽)에서 되살린다
+        var tag by remember { mutableStateOf(collector.tag) }
+        var mode by remember { mutableStateOf(collector.mode) }
         var notice by remember { mutableStateOf("") }
 
         LaunchedEffect(Unit) {
@@ -461,7 +740,10 @@ class MainActivity : ComponentActivity() {
                 ) { Text("시작") }
 
                 OutlinedButton(
-                    onClick = { collector.stop(); notice = "저장됨: ${collector.fileName}" },
+                    onClick = {
+                        collector.stop()
+                        notice = "저장됨: ${collector.fileName} · ${collector.eventFileName}"
+                    },
                     enabled = ui.running,
                     modifier = Modifier.weight(1f)
                 ) { Text("정지") }
@@ -487,6 +769,7 @@ class MainActivity : ComponentActivity() {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Stat("경과", String.format(Locale.US, "%.1f s", ui.elapsedSec))
                 Stat("rows", ui.totalRows.toString())
+                Stat("events", ui.eventRows.toString())
                 Stat("파일", ui.fileName.take(22))
             }
 
@@ -505,7 +788,8 @@ class MainActivity : ComponentActivity() {
                 "rows=수신 행 수 · pkt/s=rows÷경과초(조건 비교는 이 값) · " +
                         "seqObs%=고유seq÷seq구간(연속성) · dup=rows÷고유seq(진단값)\n" +
                         "ALL* = ALL_CONTROL 모드 표식이며 실제 RF 채널 번호가 아님\n" +
-                        "back = seq 역행 횟수. 0이 아니면 T2 확인 필요",
+                        "back = seq 역행 횟수. 0이 아니면 T2 확인 필요\n" +
+                        "events = 상태 이벤트 로그 행 수. 10초마다 최소 1씩 늘어야 정상",
                 fontSize = 11.sp, color = Color(0xFF94A3B8), lineHeight = 15.sp
             )
         }
