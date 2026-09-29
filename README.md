@@ -1,7 +1,8 @@
 # BLE Channel Probe — Phase 0
 
-ESP32 비콘이 광고 payload 에 적어 보낸 **채널 라벨**과 안드로이드가 측정한 **RSSI** 를
-CSV 로 남기는 수집 앱이다. 측위·삼변측량·모델은 들어 있지 않다.
+BLE 광고의 **RSSI·시각·원본**을 정답(줄자 거리·가림 시각)과 함께 CSV 로 남기는 수집 앱이다.
+모드는 셋이다 — RAW(주변 아무 기기), BEACON(우리 ESP32 비콘), TAG(SmartTag2, 본 측정, 9장).
+측위·가림 감지·보정은 들어 있지 않다 — Phase 0' GO(10/16) 전에는 넣지 않는다(APP_DESIGN v1).
 Phase 0 의 질문은 하나뿐이다 — **수집이 끊기지 않고 되는가.**
 
 ---
@@ -14,6 +15,8 @@ Phase 0 의 질문은 하나뿐이다 — **수집이 끊기지 않고 되는가
 | payload 의 channel_id 파싱 | RF 채널 실측 (→ nRF Sniffer) |
 | 채널별 rows / pkt/s / seq 연속성 | 필터·칼만·핏팅 |
 | CSV 저장 (analyze.py 컬럼명 그대로) | 백그라운드 장시간 수집 |
+| TAG: 서비스 데이터 원본, 조건 코드, `meta_<stamp>.json` 정답 | 태그 서비스 데이터 해석 (B1 확인 뒤) |
+| 추정기 자리(인터페이스) | 거리·가림·보정 구현, 그래프·찾기·재생 화면 (GO 이후) |
 
 `channel_id` 는 **비콘이 스스로 적어 보낸 라벨**이다. 수신기가 실제로 그 채널에서
 들었다는 증거가 아니다. 실제 채널 확정은 nRF Sniffer 의 Channel Index 로만 한다.
@@ -63,17 +66,19 @@ Phase 0 측정에는 지장이 없다.
 내장저장소/Android/data/com.knu.blechprobe/files/ble_logs/
 ```
 
-측정 1회에 파일이 **2개** 생긴다. 같은 `<stamp>` 로 짝을 맞춘다.
+측정 1회에 파일이 **3개** 생긴다. 같은 `<stamp>` 로 짝을 맞춘다.
 
 | 파일 | 컬럼 |
 |---|---|
-| `beacon_<stamp>.csv` | `rx_wall_ms,rx_elapsed_ms,beacon_id,channel_id,seq,rssi,tx_uptime_ms,tx_power_dbm,tag,ts_nanos,address` |
 | `raw_<stamp>.csv` | `rx_wall_ms,rx_elapsed_ms,address,rssi,name,tag,ts_nanos` |
-| `events_<stamp>.csv` | 폰 상태 이벤트 로그 (→ 4.1) |
+| `beacon_<stamp>.csv` | `rx_wall_ms,rx_elapsed_ms,beacon_id,channel_id,seq,rssi,tx_uptime_ms,tx_power_dbm,tag,ts_nanos,address` |
+| `tag_<stamp>.csv` | `rx_wall_ms,rx_elapsed_ms,ts_nanos,address,rssi,is_legacy,primary_phy,secondary_phy,adv_sid,svc_uuid,svc_data_hex,scan_seq,cond` (→ 9장) |
+| `events_<stamp>.csv` | 폰 상태·런 이벤트 로그 (→ 4.1) |
+| `meta_<stamp>.json` | 런 1개의 정답과 조건·스캔 설정·기종·앱 버전 (→ 9장) |
 
 `<stamp>` 는 `yyyyMMdd_HHmmss`. 9/27 에 `ts_nanos`(두 파일)와 `address`(BEACON)를
-**맨 끝에** 추가했다. `scripts/` 의 분석 스크립트는 `DictReader` 로 이름을 읽으므로
-이전 CSV 와 섞어 써도 깨지지 않는다.
+**맨 끝에** 추가했다. 새 컬럼은 앞으로도 맨 끝에 붙인다. `scripts/` 의 분석 스크립트는
+`DictReader` 로 이름을 읽으므로 이전 CSV 와 섞어 써도 깨지지 않는다.
 
 - `rx_wall_ms` — 수신 시각, 벽시계 epoch ms. 파일·세션 간 정렬용
 - `rx_elapsed_ms` — 측정 시작부터의 경과 ms. **단조시계**(`elapsedRealtime`) 기준이라
@@ -81,10 +86,12 @@ Phase 0 측정에는 지장이 없다.
 - `channel_id` — 비콘이 적어 보낸 라벨. `37|38|39`, 그리고 `0 = ALL_CONTROL`
   (모드 표식이며 RF 채널 아님. 화면에는 `ALL*` 로 표시)
 - `tag` — 실험 조건 문자열. **비어 있으면 앱이 시작을 거부한다**
-- `ts_nanos` — `ScanResult.getTimestampNanos()`. 컨트롤러가 패킷을 **관측한 시각**,
-  부팅 후 ns (`elapsedRealtimeNanos` 와 같은 시계, 수면 시간 포함).
-  `rx_elapsed_ms` 는 콜백이 불린 시각이라 전달 지연이 더해져 있다.
-  패킷 간격·M4(채널 전환 소요 시간) 분석은 이 컬럼으로 한다
+- `ts_nanos` — `ScanResult.getTimestampNanos()`. 공식 문서가 말하는 것은 "부팅 후,
+  스캔 레코드가 관측된 시각"까지다 [공식]. **컨트롤러가 받은 시각인지 호스트가 처리한
+  시각인지는 문서에 없다 [미검증]** — 9/27 판 README·주석의 "컨트롤러 관측 시각,
+  전달 지연 제외"는 근거 없는 서술이었다. `elapsedRealtimeNanos` 와 같은 시계라
+  이벤트 CSV 와 그대로 맞댈 수 있다. `rx_elapsed_ms` 는 콜백이 불린 시각이다.
+  패킷 간격·M4 분석의 기준 시각으로 쓰되, 두 시각의 차이 자체가 확인 대상이다
 - `address` (BEACON) — 송신 MAC. T4c 에서 nRF Sniffer 캡처와 대조하고,
   비콘이 여러 대가 되면 `beacon_id` 와 교차 확인하는 데 쓴다
 
@@ -128,7 +135,12 @@ Phase 0 측정에는 지장이 없다.
 
 | `event` | `value` | 언제 |
 |---|---|---|
-| `session_start` | `RAW`/`BEACON` | 측정 시작. `detail` 에 파일명·기종·SDK·스캔 설정·`batt_opt_exempt`(6장 3번이 실제로 적용됐는지) |
+| `session_start` | `RAW`/`BEACON`/`TAG` | 측정 시작. `detail` 에 파일명·기종·SDK·스캔 설정·`batt_opt_exempt`(6장 3번이 실제로 적용됐는지) |
+| `scan_start` | `scan_seq` | `startScan` 호출. `detail` 에 호출 직전·직후 `pre_ns`/`post_ns` — 채널 역산(M4)의 기준 시각 |
+| `timer` | `10`/`30`/`90`/`120` | TAG 런 알림음이 울린 시각. `10` = 카운트다운 끝(런 시계 0 s), 나머지는 런 시계 초 |
+| `block_in_planned` / `block_out_planned` | 사람 수 | 사람 가림 런의 예정 전환 시각(알림음 시각). `detail` 에 가림 위치 |
+| `run_end` | `auto`/`user`/… | 런 종료. `auto` = 120 s 자동 종료 |
+| `run_flag` | `valid`/`invalid` | 런이 끝난 뒤 조작자가 표시. `detail` = 이유. 여러 번 누르면 마지막 행이 유효 |
 | `tick` | | 10초마다. `rows` 차이 = 10초 처리량 |
 | `activity` | `onCreate` … `onDestroy` | Activity 생명주기. `onCreate` 의 `detail` 에 `recreated`·`night`·`fontScale`. `onDestroy` 행은 설정 변경 재생성일 때만 남는다(`changingConfig=1`) — 정말 끝날 때는 ViewModel 이 먼저 정리돼 `session_stop vm_cleared` 가 마지막 행이 된다 |
 | `screen` | `on`/`off` | 화면 켜짐·꺼짐 |
@@ -138,7 +150,10 @@ Phase 0 측정에는 지장이 없다.
 | `bt` | 어댑터 상태 | 블루투스 켜짐·꺼짐 |
 | `thermal` | 0–6 | 발열 상태 변경 (API 29+) |
 | `scan_failed` | errorCode | `onScanFailed` |
-| `session_stop` | `user`/`scan_failed`/`vm_cleared` | 측정 종료 이유 |
+| `session_stop` | `user`/`auto`/`scan_failed`/`vm_cleared` | 측정 종료 이유 (`run_end` 바로 다음 행) |
+
+`scan_restart` 는 아직 나오지 않는다. 런 도중에 스캔을 다시 시작하는 경로가 없어서
+`scan_seq` 는 늘 1 이다 (런마다 새 스캔).
 
 읽을 때 주의:
 
@@ -198,8 +213,8 @@ A3 는 현재 **미검증**이다. 재측정부터는 앱이 상태를 `events_<
 `startScan` 은 30초에 5회를 넘기면 시스템이 **조용히** 결과를 끊는다. 에러도 안 난다.
 그래서 앱은 이렇게 만들었다.
 
-- 스캔은 한 번 시작해 계속 유지한다. **모드를 바꿔도 재시작하지 않는다** —
-  필터 없이 켜 두고 기록 대상만 바꾼다
+- 스캔은 측정(런)마다 한 번 시작해 끝까지 유지한다. **런 도중에는 재시작하지 않는다** —
+  필터 없이 켜 두고 모드에 따라 기록 대상만 고른다. 모드는 측정 중에 바꿀 수 없다
 - 화면에 `스캔 시작 여유 N / 4` 를 표시해 시스템 한도 5 보다 하나 앞에서 막는다
 
 ---
@@ -231,10 +246,102 @@ Galaxy / One UI 기준이다. 버전에 따라 메뉴 이름이 조금씩 다르
 ## 8. 알려진 한계
 
 - **빌드:** 커밋 `79bd045` 기준으로 실기기에서 `assembleDebug` 와 실행을 확인했다.
-  9/27 의 이벤트 로그·ViewModel·`ts_nanos`·`address` 변경은 **아직 실기기 빌드 전**이다.
+  9/27(이벤트 로그·ViewModel)과 9/29(패키지 분리·TAG 모드) 변경은 **아직 실기기 빌드 전**이다.
   작업 환경에 Android SDK 가 없어, API 36 프레임워크(Robolectric `android-all`)와
   Compose 공통 API 에 대해 Kotlin 컴파일 검사만 통과시켰다. AndroidX
   activity/lifecycle/core 는 공개 시그니처를 옮긴 스텁으로 대신했다
+- **TAG 필터의 서비스 UUID(FD5A/FD59)는 B1 에서 확인할 가정이다 [미검증].** 태그가 다른
+  UUID 로 광고하면 TAG 모드는 아무것도 기록하지 않는다(점검 표시 '마지막 수신'이 빨개진다).
+  `parse/TagFilter.kt` 의 목록 한 줄만 고치면 된다
 - 화면을 켠 채 측정한다. 포그라운드 서비스가 없어 장시간 백그라운드 수집은 못 한다
 - `channel_id` 는 라벨이다. 실제 RF 채널 확정은 T4c (nRF Sniffer) 로만 한다
 - RAW 모드는 `seq` 가 없으므로 `seqObs% / dup / back` 이 의미 없다 (`-` 로 표시)
+
+---
+
+## 9. TAG 모드 측정 (APP_DESIGN v1, Phase 0')
+
+### 9.1 모드별 스캔 설정
+
+공통: `SCAN_MODE_LOW_LATENCY`, `CALLBACK_TYPE_ALL_MATCHES`, report delay 0, 필터 없음.
+
+| 모드 | legacy | PHY | 이유 |
+|---|---|---|---|
+| RAW | `true` | 지정 안 함 | 9/22 A3 측정과 같아야 재측정 결과를 비교할 수 있다 |
+| TAG | `false` | `PHY_LE_1M` | `setLegacy` 기본값 true 는 레거시 광고만 돌려준다 [공식] — 태그가 확장 광고를 쓰면 안 보인다(B9). `setPhy` 는 legacy=false 일 때만 쓰이고 기본값은 문서에 없다 [공식]. `PHY_LE_ALL_SUPPORTED` 면 Coded PHY 도 스캔해 스캔 창 시간표가 바뀔 수 있어 [추론] 1M 으로 고정 |
+| BEACON | `false` | `PHY_LE_1M` | TAG 와 같게 — M4 결과를 TAG 측정에 옮기려면 스캔 설정이 같아야 한다 |
+
+legacy=false 여도 레거시 광고는 그대로 받는다. `meta_<stamp>.json` 의 `scan` 에 설정과
+`le_extended_adv_supported`·`le_coded_phy_supported`(어댑터 지원 여부)가 남는다.
+
+### 9.2 조건 입력 → 조건 코드
+
+자유 입력 대신 칩으로 고른다. 오타 한 번이면 정답 매칭(T5)이 깨지기 때문이다.
+
+- 거리 1/3/5 m · 가림(없음/1/2/3명/벽/장비) · 가림 위치(태그 앞/중간/폰 앞) · 날(1~3) · 배치 번호
+- **조건 코드** 자동 생성 — 예: `d3_p2-mid_day1_pl04`, `d1_none_day2_pl01`.
+  `tag_<stamp>.csv` 의 `cond`, 이벤트 CSV 의 `tag`, meta 의 `cond` 에 같은 값이 들어간다
+- 고정 설정(펼쳐서 입력, 앱을 다시 켜도 남는다): 폰·태그 높이(cm), 방향, 조작자 위치,
+  태그 등록 여부, SmartThings 연결 여부
+- **폰·태그 높이가 비어 있으면 시작하지 않는다.** 정답 직선거리 = √(수평거리² + 높이차²)
+  를 meta 에 적어야 해서다. 벽이면 재질, 장비면 종류도 필수
+
+### 9.3 런 진행 — 측정 중에는 아무도 폰을 만지지 않는다
+
+런 종류는 가림 종류가 정한다(따로 고르면 둘이 어긋날 수 있다).
+
+| 가림 | 런 | 진행 (런 시계 초) |
+|---|---|---|
+| 없음 | 무가림 120 s | 시작 → 10 s 카운트다운 → 0 ~ 120 기록 → 자동 종료 |
+| 1/2/3명 | 사람 가림 30-60-30 | 카운트다운 → 0 무가림 → **30 들어오세요** → **90 나가세요** → 120 자동 종료 |
+| 벽/장비 | 정적 120 s | 무가림 120 s 와 같다 |
+
+알림음 (알람 음량을 쓴다 — **측정 전에 알람 볼륨을 올려 둘 것**):
+
+| 소리 | 뜻 |
+|---|---|
+| ▬ (1번) | 카운트다운 끝, 기록 시작 (런 시계 0) |
+| ▬ ▬ (2번) | 30 s — 들어오세요 |
+| ▬ ▬ ▬ (3번) | 90 s — 나가세요 |
+| ▬▬▬ (길게) | 120 s — 끝, 자동 종료 |
+
+- 가림 시각은 버튼이 아니라 **알림음 시각으로 자동 기록**한다(`block_in_planned` / `block_out_planned`).
+  손이나 몸이 폰에 가까워지면 그것 자체가 가림이 된다 [추론]
+- 카운트다운 10 초 동안 조작자는 정해진 자리로 물러난다. 이 구간도 기록하지만 채점에서 뺀다
+- 사람이 움직이는 몇 초도 채점에서 뺀다 — 몇 초로 할지는 Phase 1 전에 고정
+- 화면 맨 위에 큰 타이머와 안내 문구가 뜬다(멀리서 보이게)
+- 런이 끝나면 **유효 / 무효** 를 표시한다(무효면 이유). `run_flag` 이벤트와 meta 의
+  `result.flag` 에 남는다. 표시는 런이 끝난 뒤에만 한다
+
+### 9.4 점검 표시
+
+| 표시 | 뜻 |
+|---|---|
+| `pkt/s` | 기록 대상 패킷 수 ÷ 경과초 |
+| 마지막 RSSI | 가장 최근 기록 행 |
+| 광고 | 마지막 패킷이 `legacy` 인지 `확장` 인지 (B9) |
+| 마지막 수신 | 마지막 기록 행 이후 경과 초. **5 초를 넘으면 빨간색**(태그 광고 주기 확인 뒤 조정 [추론]) |
+
+### 9.5 `meta_<stamp>.json`
+
+런을 시작할 때 쓰고, 끝날 때(`result.end`·`rows`·`duration_s`)와 유효/무효 표시 때
+(`result.flag`·`flag_reason`) 다시 쓴다. 모르는 값은 `null`.
+
+`truth`(수평거리·높이·직선거리) · `condition`(거리·가림·사람 수·위치·벽 재질·장비·날·배치·조작자 위치) ·
+`orientation` · `tag_state`(등록·SmartThings·배터리 모드 `normal` 고정) · `run`(종류·카운트다운·전환 시각) ·
+`scan` · `device`(제조사·기종·SDK·빌드·fingerprint) · `app`(버전) · `photo` · `result`
+
+RAW·BEACON 도 meta 를 남긴다(`truth`·`condition` 은 `null`, `run.type` = `MANUAL`).
+
+### 9.6 코드 구조
+
+```
+collect/   Collector(스캔·기록·런 진행) PhoneState CsvSink SampleCsv ScanConfig RunMeta Beeper FormStore ViewModel
+parse/     BeaconParser  TagFilter(FD5A/FD59 원본만 — 해석은 B1 뒤)
+model/     Sample RunEvent TagForm·RunType(조건) Mode 화면 스냅샷
+source/    SampleSource — 실시간(Collector)과 GO 이후 재생(CsvReplaySource)이 같은 흐름을 쓴다
+estimate/  DistanceEstimator ChannelClassifier BlockageDetector Corrector — 인터페이스만. GO 이후 구현
+ui/        RecordScreen(① 측정) TagFormSection
+```
+
+새 라이브러리는 넣지 않았다. ② 라이브 그래프 · ③ 찾기 · ④ 재생 화면은 GO 이후.

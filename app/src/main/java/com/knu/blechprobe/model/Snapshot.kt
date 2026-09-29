@@ -17,4 +17,17 @@ data class UiState(
     val fileName: String = "-",
     val rows: List<StatRow> = emptyList(),
     val notice: String = "",
+    /** TAG 는 조건 코드, 그 밖에는 자유 입력 tag */
+    val cond: String = "",
+    /** TAG 런일 때만. 런 시계 = 경과초 − 카운트다운 (카운트다운 중에는 음수) */
+    val runType: RunType? = null,
+    val runClockSec: Double? = null,
+    /* 점검 표시 — 기록 대상 패킷 기준 */
+    val pktPerSec: Double = 0.0,
+    val lastRssi: Int? = null,
+    val lastLegacy: Boolean? = null,
+    val sinceLastSec: Double? = null,
+    /* 끝난 런의 유효/무효 표시 */
+    val canFlag: Boolean = false,
+    val lastFlag: String? = null,
 )
