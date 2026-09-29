@@ -429,6 +429,7 @@ class Collector(private val ctx: Context) : SampleSource {
         val beacon = if (m == Mode.BEACON) (BeaconParser.parse(record) ?: return) else null
         val svc = if (m == Mode.TAG) (TagFilter.find(record) ?: return) else null
         val name = if (m == Mode.RAW) (try { record?.deviceName ?: "" } catch (_: SecurityException) { "" }) else ""
+        val ids = if (m == Mode.RAW) TagFilter.summarize(record) else Triple("", "", "")
 
         val s = Sample(
             rxWallMs = wall,
@@ -446,6 +447,9 @@ class Collector(private val ctx: Context) : SampleSource {
             name = name,
             beacon = beacon,
             svc = svc,
+            svcDataUuids = ids.first,
+            svcUuids = ids.second,
+            mfgIds = ids.third,
         )
         synchronized(lock) {
             val key = when (m) {

@@ -25,6 +25,21 @@ object TagFilter {
         return null
     }
 
+    /**
+     * B1 찾기용 — 광고에 들어 있는 식별자 요약 (RAW CSV 의 뒤 세 컬럼).
+     * 태그를 폰에 붙여 RAW 로 잠깐 받으면, 가장 센 기기의 이 값이 태그의 광고 형식이다.
+     * @return (서비스 데이터 UUID, 광고 서비스 UUID, 제조사 ID) 각각 '|' 로 이음
+     */
+    fun summarize(record: ScanRecord?): Triple<String, String, String> {
+        if (record == null) return Triple("", "", "")
+        val data = record.serviceData?.keys?.joinToString("|") { shortUuid(it) } ?: ""
+        val uuids = record.serviceUuids?.joinToString("|") { shortUuid(it) } ?: ""
+        val mfg = record.manufacturerSpecificData?.let { a ->
+            (0 until a.size()).joinToString("|") { String.format("%04X", a.keyAt(it)) }
+        } ?: ""
+        return Triple(data, uuids, mfg)
+    }
+
     /** 0000fd5a-0000-1000-8000-00805f9b34fb → FD5A */
     private fun shortUuid(u: ParcelUuid): String {
         val s = u.toString()

@@ -25,6 +25,10 @@ data class Sample(
     val name: String = "",
     val beacon: BeaconPayload? = null,
     val svc: ServiceData? = null,
+    /** RAW 만: 서비스 데이터 UUID · 광고 서비스 UUID · 제조사 ID ('|' 로 이음). B1 찾기용 */
+    val svcDataUuids: String = "",
+    val svcUuids: String = "",
+    val mfgIds: String = "",
 )
 
 /** events_<stamp>.csv 한 행의 핵심. 상태 스냅샷 열은 CSV 에만 있다 */

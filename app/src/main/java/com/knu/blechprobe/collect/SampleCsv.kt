@@ -15,7 +15,8 @@ internal object SampleCsv {
     }
 
     fun header(mode: Mode) = when (mode) {
-        Mode.RAW -> "rx_wall_ms,rx_elapsed_ms,address,rssi,name,tag,ts_nanos"
+        // 9/30: svc_data_uuids,svc_uuids,mfg_ids 를 끝에 붙임 (B1 찾기 — scripts/b1_find.py)
+        Mode.RAW -> "rx_wall_ms,rx_elapsed_ms,address,rssi,name,tag,ts_nanos,svc_data_uuids,svc_uuids,mfg_ids"
         Mode.BEACON ->
             "rx_wall_ms,rx_elapsed_ms,beacon_id,channel_id,seq,rssi,tx_uptime_ms,tx_power_dbm,tag,ts_nanos,address"
         Mode.TAG ->
@@ -25,7 +26,8 @@ internal object SampleCsv {
 
     /** @param tag RAW·BEACON 은 자유 입력 tag, TAG 는 조건 코드 */
     fun row(mode: Mode, s: Sample, tag: String): String = when (mode) {
-        Mode.RAW -> "${s.rxWallMs},${s.rxElapsedMs},${s.address},${s.rssi},${csv(s.name)},${csv(tag)},${s.tsNanos}"
+        Mode.RAW -> "${s.rxWallMs},${s.rxElapsedMs},${s.address},${s.rssi},${csv(s.name)},${csv(tag)},${s.tsNanos}," +
+            "${s.svcDataUuids},${s.svcUuids},${s.mfgIds}"
         Mode.BEACON -> {
             val b = s.beacon!!
             "${s.rxWallMs},${s.rxElapsedMs},${b.beaconId},${b.channelId},${b.seq},${s.rssi},${b.uptimeMs}," +

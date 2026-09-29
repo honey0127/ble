@@ -57,14 +57,18 @@ fun RecordScreen(collector: Collector, permGranted: Boolean, onRequestPerms: () 
         Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text("BLE Channel Probe", fontSize = 22.sp, fontWeight = FontWeight.Bold)
-        Text("① 측정", fontSize = 13.sp, color = Subtle)
+        Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("BLE Channel Probe", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            Text("① 측정", fontSize = 13.sp, color = Subtle)
+        }
 
         /* 런 진행 중에는 큰 타이머를 맨 위에 둔다 — 멀리서 보여야 한다 */
         ui.runType?.let { rt -> if (ui.running) RunPanel(rt, ui.runClockSec ?: 0.0) }
 
         /* 모드 */
-        ChipRow(Mode.entries, mode, !ui.running, { it.name }) { m ->
+        ChipRow(Mode.entries, mode, !ui.running, {
+            when (it) { Mode.RAW -> "RAW 주변"; Mode.BEACON -> "BEACON 비콘"; Mode.TAG -> "TAG 태그" }
+        }) { m ->
             mode = m; collector.mode = m
         }
         Text(
@@ -77,17 +81,19 @@ fun RecordScreen(collector: Collector, permGranted: Boolean, onRequestPerms: () 
         )
 
         /* 조건 */
-        if (mode == Mode.TAG) {
-            TagFormSection(form, enabled = !ui.running) { f -> form = f; collector.updateForm(f) }
-        } else {
-            OutlinedTextField(
-                value = tag,
-                onValueChange = { tag = it; collector.tag = it },
-                label = { Text("실험 조건 tag  예: 3m_사람0명_ch37") },
-                singleLine = true,
-                enabled = !ui.running,
-                modifier = Modifier.fillMaxWidth()
-            )
+        Section("조건") {
+            if (mode == Mode.TAG) {
+                TagFormSection(form, enabled = !ui.running) { f -> form = f; collector.updateForm(f) }
+            } else {
+                OutlinedTextField(
+                    value = tag,
+                    onValueChange = { tag = it; collector.tag = it },
+                    label = { Text("실험 조건 tag  예: 3m_사람0명_ch37") },
+                    singleLine = true,
+                    enabled = !ui.running,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
         }
 
         /* 시작 / 정지 */
@@ -104,8 +110,8 @@ fun RecordScreen(collector: Collector, permGranted: Boolean, onRequestPerms: () 
                     if (!collector.start()) notice = collector.consumeNotice()
                 },
                 enabled = !ui.running,
-                modifier = Modifier.weight(1f)
-            ) { Text(if (mode == Mode.TAG) "런 시작 (${form.runType.countdownS}초 뒤 기록)" else "시작") }
+                modifier = Modifier.weight(2f).height(52.dp)
+            ) { Text(if (mode == Mode.TAG) "런 시작 (${form.runType.countdownS}초 뒤 기록)" else "시작", fontSize = 16.sp) }
 
             OutlinedButton(
                 onClick = {
@@ -113,8 +119,8 @@ fun RecordScreen(collector: Collector, permGranted: Boolean, onRequestPerms: () 
                     notice = "저장됨: ${collector.fileName} · ${collector.eventFileName}"
                 },
                 enabled = ui.running,
-                modifier = Modifier.weight(1f)
-            ) { Text("정지") }
+                modifier = Modifier.weight(1f).height(52.dp)
+            ) { Text("정지", fontSize = 16.sp) }
         }
 
         if (!permGranted) {
@@ -137,41 +143,37 @@ fun RecordScreen(collector: Collector, permGranted: Boolean, onRequestPerms: () 
             fontSize = 11.sp, color = Muted
         )
 
-        HorizontalDivider()
-
         /* 점검 표시 — 기록 대상 패킷 기준 */
-        Checks(ui)
-
-        /* 요약 */
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Stat("경과", String.format(Locale.US, "%.1f s", ui.elapsedSec))
-            Stat("rows", ui.totalRows.toString())
-            Stat("events", ui.eventRows.toString())
-            Stat("파일", ui.fileName.take(22))
+        Section("점검") {
+            Checks(ui)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Stat("경과", String.format(Locale.US, "%.1f s", ui.elapsedSec))
+                Stat("rows", ui.totalRows.toString())
+                Stat("events", ui.eventRows.toString())
+                Stat("파일", ui.fileName.take(22))
+            }
+            if (ui.cond.isNotEmpty()) {
+                Text("tag/cond  ${ui.cond}", fontSize = 11.sp, color = Muted, fontFamily = FontFamily.Monospace)
+            }
+            Text("events 는 10초마다 최소 1씩 늘어야 정상", fontSize = 11.sp, color = Muted)
         }
-        if (ui.cond.isNotEmpty()) {
-            Text("tag/cond  ${ui.cond}", fontSize = 11.sp, color = Muted, fontFamily = FontFamily.Monospace)
-        }
-
-        HorizontalDivider()
 
         /* 채널별 표 */
-        Text("채널별 현황", fontWeight = FontWeight.SemiBold)
-        Header()
-        ui.rows.forEach { RowLine(it) }
-        if (ui.rows.isEmpty()) {
-            Text("아직 수신된 패킷이 없습니다.", fontSize = 12.sp, color = Muted)
+        Section(if (mode == Mode.BEACON) "채널별 현황" else "수신 현황") {
+            Header()
+            ui.rows.forEach { RowLine(it) }
+            if (ui.rows.isEmpty()) {
+                Text("아직 수신된 패킷이 없습니다.", fontSize = 12.sp, color = Muted)
+            }
+            // seq·채널 지표는 우리 비콘에만 의미가 있다
+            if (mode == Mode.BEACON) Text(
+                "rows=수신 행 수 · pkt/s=rows÷경과초(조건 비교는 이 값) · " +
+                        "seqObs%=고유seq÷seq구간(연속성) · dup=rows÷고유seq(진단값)\n" +
+                        "ALL* = ALL_CONTROL 모드 표식이며 실제 RF 채널 번호가 아님\n" +
+                        "back = seq 역행 횟수. 0이 아니면 T2 확인 필요",
+                fontSize = 11.sp, color = Muted, lineHeight = 15.sp
+            )
         }
-
-        Spacer(Modifier.height(4.dp))
-        Text(
-            "rows=수신 행 수 · pkt/s=rows÷경과초(조건 비교는 이 값) · " +
-                    "seqObs%=고유seq÷seq구간(연속성) · dup=rows÷고유seq(진단값)\n" +
-                    "ALL* = ALL_CONTROL 모드 표식이며 실제 RF 채널 번호가 아님\n" +
-                    "back = seq 역행 횟수. 0이 아니면 T2 확인 필요\n" +
-                    "events = 상태 이벤트 로그 행 수. 10초마다 최소 1씩 늘어야 정상",
-            fontSize = 11.sp, color = Muted, lineHeight = 15.sp
-        )
     }
 }
 

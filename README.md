@@ -70,7 +70,7 @@ Phase 0 측정에는 지장이 없다.
 
 | 파일 | 컬럼 |
 |---|---|
-| `raw_<stamp>.csv` | `rx_wall_ms,rx_elapsed_ms,address,rssi,name,tag,ts_nanos` |
+| `raw_<stamp>.csv` | `rx_wall_ms,rx_elapsed_ms,address,rssi,name,tag,ts_nanos,svc_data_uuids,svc_uuids,mfg_ids` |
 | `beacon_<stamp>.csv` | `rx_wall_ms,rx_elapsed_ms,beacon_id,channel_id,seq,rssi,tx_uptime_ms,tx_power_dbm,tag,ts_nanos,address` |
 | `tag_<stamp>.csv` | `rx_wall_ms,rx_elapsed_ms,ts_nanos,address,rssi,is_legacy,primary_phy,secondary_phy,adv_sid,svc_uuid,svc_data_hex,scan_seq,cond` (→ 9장) |
 | `events_<stamp>.csv` | 폰 상태·런 이벤트 로그 (→ 4.1) |
@@ -92,6 +92,8 @@ Phase 0 측정에는 지장이 없다.
   전달 지연 제외"는 근거 없는 서술이었다. `elapsedRealtimeNanos` 와 같은 시계라
   이벤트 CSV 와 그대로 맞댈 수 있다. `rx_elapsed_ms` 는 콜백이 불린 시각이다.
   패킷 간격·M4 분석의 기준 시각으로 쓰되, 두 시각의 차이 자체가 확인 대상이다
+- `svc_data_uuids`, `svc_uuids`, `mfg_ids` (RAW, 9/30) — 광고에 든 서비스 데이터 UUID ·
+  광고 서비스 UUID · 제조사 ID (`|` 로 이음). B1(태그가 어떤 식별자로 광고하나) 찾기용 (10장)
 - `address` (BEACON) — 송신 MAC. T4c 에서 nRF Sniffer 캡처와 대조하고,
   비콘이 여러 대가 되면 `beacon_id` 와 교차 확인하는 데 쓴다
 
@@ -246,7 +248,7 @@ Galaxy / One UI 기준이다. 버전에 따라 메뉴 이름이 조금씩 다르
 ## 8. 알려진 한계
 
 - **빌드:** 커밋 `79bd045` 기준으로 실기기에서 `assembleDebug` 와 실행을 확인했다.
-  9/27(이벤트 로그·ViewModel)과 9/29(패키지 분리·TAG 모드) 변경은 **아직 실기기 빌드 전**이다.
+  9/27(이벤트 로그·ViewModel)·9/29(패키지 분리·TAG 모드)·9/30(RAW 식별자 컬럼·UI 정리) 변경은 **아직 실기기 빌드 전**이다.
   작업 환경에 Android SDK 가 없어, API 36 프레임워크(Robolectric `android-all`)와
   Compose 공통 API 에 대해 Kotlin 컴파일 검사만 통과시켰다. AndroidX
   activity/lifecycle/core 는 공개 시그니처를 옮긴 스텁으로 대신했다
@@ -345,3 +347,31 @@ ui/        RecordScreen(① 측정) TagFormSection
 ```
 
 새 라이브러리는 넣지 않았다. ② 라이브 그래프 · ③ 찾기 · ④ 재생 화면은 GO 이후.
+
+---
+
+## 10. 분석 스크립트 (`scripts/`)
+
+전부 파이썬 표준 라이브러리만 쓴다. 같은 폴더의 `events_`/`meta_<stamp>` 를 자동으로 찾는다.
+**판정은 하지 않고 숫자만 낸다** — 통과 기준은 PLAN 이 정한다.
+
+| 스크립트 | 언제 | 무엇 |
+|---|---|---|
+| `raw_check.py <raw.csv>` | A3 1단계 | 0 인 분이 있나 (콜백 생존) |
+| `raw_breakdown.py <raw.csv> [분 MAC]` | A3 2·4단계 | 급락이 수신기 측인가 환경 측인가, 고정 MAC 배율 |
+| `events_view.py <events.csv>` | A3 3단계 | 10초 처리량과 상태 변화를 시간순으로. 가장 큰 낙폭(▼)과 그 ±20초 이벤트 |
+| `b1_find.py <raw.csv>` | B1 | 태그를 폰에 붙이고 RAW 1분 → 가장 센 기기의 식별자가 TAG 필터(FD5A/FD59)와 같은가 |
+| `tag_check.py <tag.csv> [--margin 3]` | TAG 런마다 | 수집량·공백, legacy/PHY(B9), 주소 교체(T2), 수신 간격, 콜백 지연, 구간별 RSSI |
+| `m4_channel.py <beacon.csv> [--dwell D]` | M4 | FIXED 채널 런의 받은 시각이 채널 시간대에 몰리나. D 탐색, 경과 시간별 적중률 |
+
+합성 데이터로 확인한 것 (정답을 심어 두고 찾는지 봤다):
+
+- `events_view` — 300 s 에 화면 꺼짐 + 처리량 1/30 → 310 s 구간 0.03배, 직전 `screen off`·`onPause` 표시
+- `b1_find` — FD5A 기기(-38 dBm)가 맨 위, "B1 가정이 맞다"
+- `tag_check` — 가림 구간 RSSI -68 vs 앞뒤 -60, 콜백 지연 15 ms, 주소 교체 1번, 9 s 공백 1번
+- `m4_channel` — D=4.096 s 순환을 4.097 s 로 찾음, 적중률 0.99, 채널 위상이 1/3 씩 어긋남.
+  **대조군**(시간대와 무관한 수신)은 0.40 — D 를 탐색하면 우연만으로도 0.4 가 나온다
+
+B1 찾는 법: 태그를 폰 뒷면에 붙인 채 RAW 1분 → `b1_find.py`. 태그를 멀리 치웠다가 다시
+붙여 한 번 더 받아 같은 줄이 맨 위면 태그다. RAW 는 legacy 스캔이라 **확장 광고만 쓰는
+태그는 여기 안 나온다** — 그때 TAG 모드에서도 안 잡히면 B9 쪽이다.

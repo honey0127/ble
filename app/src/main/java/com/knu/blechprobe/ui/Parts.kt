@@ -32,6 +32,16 @@ internal val Warn = Color(0xFFDC2626)
         Text(text, fontSize = 12.sp, color = Ink)
     }
 
+/** 옅은 카드 한 장. 화면을 조건 · 점검 · 표 로 나눠 읽기 쉽게 한다 */
+@Composable internal fun Section(title: String, content: @Composable () -> Unit) =
+    Column(
+        Modifier.fillMaxWidth().background(Color(0xFFF8FAFC), RoundedCornerShape(12.dp)).padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(title, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Ink)
+        content()
+    }
+
 @Composable internal fun Label(text: String) = Text(text, fontSize = 12.sp, color = Subtle, fontWeight = FontWeight.SemiBold)
 
 /** 칩 한 줄. 선택지가 많으면 여러 번 부른다 (FlowRow 없이) */
