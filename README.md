@@ -253,6 +253,7 @@ Galaxy / One UI 기준이다. 버전에 따라 메뉴 이름이 조금씩 다르
 ## 8. 알려진 한계
 
 - **빌드:** 커밋 `79bd045` 기준으로 실기기에서 `assembleDebug` 와 실행을 확인했다.
+  10/3 빌드도 실기기에서 돌았다 (10/3 RAW 측정 meta 에 `preflight`, 내보내기 sha256 일치).
   9/27(이벤트 로그·ViewModel)·9/29(패키지 분리·TAG 모드)·9/29(RAW 식별자 컬럼·UI 정리)·10/3(RAW 확장 포함·내보내기·표시 사유·시작 전 점검) 변경은 **아직 실기기 빌드 전**이다.
   작업 환경에 Android SDK 가 없어, API 36 프레임워크(Robolectric `android-all`)와
   Compose 공통 API 에 대해 Kotlin 컴파일 검사만 통과시켰다. AndroidX
