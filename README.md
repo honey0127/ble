@@ -373,6 +373,7 @@ ui/        RecordScreen(① 측정) TagFormSection
   | `other` | 기타 (메모 필수) |
 
 - 유효는 사유 없이 누른다 (칩을 고른 상태에서는 유효가 눌리지 않는다). 메모는 유효에도 남길 수 있다
+- 버튼 바로 위 한 줄이 지금 무엇이 눌리는지 알려 준다 (사유 없음 → 유효만 / 기타인데 메모 없음 → 메모를 써야 무효)
 - **한 번 표시하면 바꿀 수 없다.** 결과를 본 뒤 표시를 바꾸는 일을 막는다. 무효 런 파일도 지우지 않는다
 - `run_flag` 의 `detail` = `reason=<code> memo=<…>`, meta `result.flag_reason` = 코드, `result.flag_memo` = 메모
 - 10/3 빌드(사유 여러 개, `touched`·`setup`·`no_beep`·`device`, `flag_reasons` 배열)로 표시한 런은

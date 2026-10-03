@@ -61,7 +61,9 @@ fun RecordScreen(
     }
 
     Column(
-        Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()),
+        // targetSdk 35+ 는 화면이 상태바·키보드 밑까지 그려진다(edge-to-edge 강제) [공식].
+        // safeDrawingPadding 이 없으면 키보드가 메모 칸 아래 유효/무효 버튼을 덮는다
+        Modifier.fillMaxSize().safeDrawingPadding().padding(16.dp).verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {

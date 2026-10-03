@@ -4,6 +4,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.OutlinedButton
@@ -13,9 +15,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -78,11 +83,16 @@ internal fun PreCheckSection(
 /**
  * 끝난 런 표시. 무효는 절차 사유 칩 하나를 골라야 누를 수 있고, '기타'는 메모가 있어야 한다.
  * 한 번 표시하면 바꿀 수 없고, 표시하기 전에는 결과(pkt/s·RSSI)가 가려져 있다.
+ *
+ * 고른 사유·메모는 rememberSaveable — 키보드·설정 변경으로 화면이 다시 만들어져도 풀리지 않게.
+ * 버튼이 왜 안 눌리는지는 버튼 바로 위에 글로 보인다 (10/3 실기기: 칩이 풀린 줄 모르고 무효가 안 눌림).
  */
 @Composable
 internal fun FlagPanel(lastFlag: String?, onFlag: (Boolean, FlagReason?, String) -> Unit) {
-    var picked by remember { mutableStateOf<FlagReason?>(null) }
-    var memo by remember { mutableStateOf("") }
+    var pickedCode by rememberSaveable { mutableStateOf<String?>(null) }
+    var memo by rememberSaveable { mutableStateOf("") }
+    val picked = FlagReason.entries.firstOrNull { it.code == pickedCode }
+    val focus = LocalFocusManager.current
     Section(if (lastFlag == null) "방금 런 표시 — 결과는 표시한 뒤 보인다" else "방금 런: ${if (lastFlag == "valid") "유효" else "무효"} (표시 완료)") {
         if (lastFlag != null) return@Section
         Text("무효라면 절차 사유 하나를 고른다. 신호 값은 사유가 아니다", fontSize = 12.sp, color = Subtle)
@@ -91,8 +101,8 @@ internal fun FlagPanel(lastFlag: String?, onFlag: (Boolean, FlagReason?, String)
                 pair.forEach { r ->
                     FilterChip(
                         selected = r == picked,
-                        onClick = { picked = if (r == picked) null else r },
-                        label = { Text(r.label, fontSize = 12.sp) },
+                        onClick = { pickedCode = if (r == picked) null else r.code },
+                        label = { Text((if (r == picked) "✓ " else "") + r.label, fontSize = 12.sp) },
                     )
                 }
             }
@@ -100,14 +110,22 @@ internal fun FlagPanel(lastFlag: String?, onFlag: (Boolean, FlagReason?, String)
         OutlinedTextField(
             value = memo, onValueChange = { memo = it }, singleLine = true,
             label = { Text(if (picked?.needsMemo == true) "메모 (필수)" else "메모 (선택)") },
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+            keyboardActions = KeyboardActions(onDone = { focus.clearFocus() }),
             modifier = Modifier.fillMaxWidth(),
         )
         val memoOk = picked?.needsMemo != true || memo.isNotBlank()
+        val (hint, hintColor) = when {
+            picked == null -> "고른 사유 없음 → 유효만 누를 수 있다. 무효면 위에서 사유를 고른다" to Subtle
+            !memoOk -> "사유: ${picked.label} → 메모를 써야 무효가 눌린다" to Warn
+            else -> "사유: ${picked.label} → 무효를 누를 수 있다 (유효는 사유를 풀어야 눌린다)" to Ok
+        }
+        Text(hint, fontSize = 12.sp, color = hintColor)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { onFlag(true, null, memo) }, enabled = picked == null, modifier = Modifier.weight(1f)) {
+            Button(onClick = { focus.clearFocus(); onFlag(true, null, memo) }, enabled = picked == null, modifier = Modifier.weight(1f)) {
                 Text("유효")
             }
-            OutlinedButton(onClick = { onFlag(false, picked, memo) }, enabled = picked != null && memoOk, modifier = Modifier.weight(1f)) {
+            OutlinedButton(onClick = { focus.clearFocus(); onFlag(false, picked, memo) }, enabled = picked != null && memoOk, modifier = Modifier.weight(1f)) {
                 Text("무효")
             }
         }
