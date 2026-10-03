@@ -13,7 +13,7 @@ import com.knu.blechprobe.model.ManualChecks
 import org.json.JSONObject
 
 /** 시작 전 점검 중 앱이 읽을 수 있는 것. 권한 없이 읽힌다 (Wi-Fi 는 ACCESS_WIFI_STATE, 일반 권한) */
-internal class Preflight(private val ctx: Context) {
+internal class PreCheck(private val ctx: Context) {
     private val pm = ctx.getSystemService(Context.POWER_SERVICE) as PowerManager
     private val audio = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -40,7 +40,7 @@ internal class Preflight(private val ctx: Context) {
     }
 
     companion object {
-        /** meta_<stamp>.json 의 preflight — 그 런을 시작할 때의 점검 상태 */
+        /** meta_<stamp>.json 의 precheck — 그 런을 시작할 때의 점검 상태 */
         fun toJson(a: AutoChecks, m: ManualChecks): JSONObject = JSONObject()
             .put("power_save", a.powerSave)
             .put("batt_opt_exempt", a.battOptExempt)

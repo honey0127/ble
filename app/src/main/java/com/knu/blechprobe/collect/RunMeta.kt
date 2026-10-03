@@ -21,6 +21,7 @@ internal object RunMeta {
     fun build(
         ctx: Context, stamp: String, mode: Mode, cond: String, form: TagForm?, runType: RunType?,
         scan: ScanConfig, dataFile: String, eventFile: String, adapter: BluetoothAdapter?,
+        tagNormalConfirmed: Boolean = false,
     ): JSONObject {
         val j = JSONObject()
         j.put("schema", 1)
@@ -49,7 +50,8 @@ internal object RunMeta {
             j.put("tag_state", JSONObject()
                 .put("registered", form.registered)
                 .put("smartthings_connected", form.smartThingsConnected)
-                .put("battery_mode", "normal"))           // 일반 모드 고정
+                // 고정값이 아니라 시작 전 점검에서 사람이 확인한 값. 확인 안 했으면 "unconfirmed"
+                .put("battery_mode", if (tagNormalConfirmed) "normal" else "unconfirmed"))
             j.put("photo", form.photo)
         } else {
             j.put("truth", NULL)
@@ -84,7 +86,7 @@ internal object RunMeta {
 
         j.put("result", JSONObject()
             .put("end", NULL).put("rows", NULL).put("event_rows", NULL).put("duration_s", NULL)
-            .put("flag", NULL).put("flag_reason", NULL))
+            .put("flag", NULL).put("flag_reason", NULL).put("flag_memo", NULL))
         return j
     }
 

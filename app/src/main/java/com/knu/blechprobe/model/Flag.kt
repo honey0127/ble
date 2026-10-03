@@ -1,20 +1,22 @@
 package com.knu.blechprobe.model
 
 /**
- * 무효 사유 — 결과가 아니라 **절차** 사유만 고를 수 있다.
- * "잘 안 나온 런을 뺀 것 아닌가"라는 질문에 답하려고, 무효는 이 중 하나 이상을 골라야 하고
+ * 무효 사유 — 결과가 아니라 **절차** 사유만 고를 수 있다 (APP_DESIGN 6.2a의 3, DESIGN 0절).
+ * "잘 안 나온 런을 뺀 것 아닌가"라는 질문에 답하려고, 무효는 사유 하나를 골라야 하고
  * 표시하기 전에는 화면에서 pkt/s·RSSI 를 가린다. 한 번 표시하면 바꿀 수 없다.
  */
-enum class InvalidReason(val code: String, val label: String) {
-    MOVE_TIMING("move_timing", "알림음과 다르게 움직임"),
-    TOUCHED("touched", "폰·태그를 건드림"),
-    INTRUDER("intruder", "계획 밖 사람·물체"),
-    SETUP("setup", "배치·거리·높이 오류"),
-    NO_BEEP("no_beep", "알림음을 못 들음"),
-    DEVICE("device", "폰·앱·태그 이상"),
+enum class FlagReason(val code: String, val label: String) {
+    MOVE_TIMING("move_timing", "사람 이동이 알림음과 어긋남"),
+    INTRUDER("intruder", "계획 밖 사람·물체 통과"),
+    TOUCH("touch", "폰·태그 접촉·이동"),
+    BEEP("beep", "알림음 문제"),
+    APP_ERROR("app_error", "앱 오류"),
+    OTHER("other", "기타 (메모 필수)");
+
+    val needsMemo: Boolean get() = this == OTHER
 }
 
-/** 사람이 확인하는 시작 전 점검. 앱을 다시 켜면 처음부터 다시 확인한다 */
+/** 사람이 확인하는 시작 전 점검. 배치가 바뀌면(배치 번호·날) 처음부터 다시 확인한다 */
 data class ManualChecks(
     val smartThingsClosed: Boolean = false,
     val wearablesOff: Boolean = false,

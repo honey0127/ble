@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -19,7 +20,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.knu.blechprobe.model.AutoChecks
-import com.knu.blechprobe.model.InvalidReason
+import com.knu.blechprobe.model.FlagReason
 import com.knu.blechprobe.model.ManualChecks
 
 private val Ok = Color(0xFF15803D)
@@ -38,7 +39,7 @@ private val Caution = Color(0xFFB45309)
  * 사람 가림 런은 blockers 가 하나라도 있으면 시작 버튼이 막힌다 (알림음 = 가림 시각의 정답).
  */
 @Composable
-internal fun PreflightSection(
+internal fun PreCheckSection(
     auto: AutoChecks, manual: ManualChecks, blockers: List<String>, personRun: Boolean,
     onManual: (ManualChecks) -> Unit, onTestBeep: () -> Unit, onBeepHeard: () -> Unit,
 ) = Section("시작 전 점검") {
@@ -54,7 +55,7 @@ internal fun PreflightSection(
     CheckLine(dndMark, when (dndMark) { "✗" -> Warn; "✓" -> Ok; else -> Caution }, "방해 금지", auto.dndLabel)
     CheckLine("·", Subtle, "Wi-Fi (기록만)", when (auto.wifiOn) { true -> "켜짐"; false -> "꺼짐"; null -> "모름" })
 
-    Label("사람이 확인")
+    Label("사람이 확인 — 배치가 바뀌면 다시")
     Toggle("SmartThings 앱 종료", manual.smartThingsClosed) { onManual(manual.copy(smartThingsClosed = it)) }
     Toggle("워치·버즈 등 블루투스 연결 끊기", manual.wearablesOff) { onManual(manual.copy(wearablesOff = it)) }
     Toggle("태그 일반 모드 (절전 모드 아님)", manual.tagNormalMode) { onManual(manual.copy(tagNormalMode = it)) }
@@ -75,31 +76,38 @@ internal fun PreflightSection(
     FilterChip(selected = on, onClick = { onChange(!on) }, label = { Text((if (on) "✓ " else "") + label) })
 
 /**
- * 끝난 런 표시. 무효는 절차 사유 칩을 하나 이상 골라야 누를 수 있다.
+ * 끝난 런 표시. 무효는 절차 사유 칩 하나를 골라야 누를 수 있고, '기타'는 메모가 있어야 한다.
  * 한 번 표시하면 바꿀 수 없고, 표시하기 전에는 결과(pkt/s·RSSI)가 가려져 있다.
  */
 @Composable
-internal fun FlagPanel(lastFlag: String?, onFlag: (Boolean, List<InvalidReason>) -> Unit) {
-    var picked by remember { mutableStateOf(emptySet<InvalidReason>()) }
+internal fun FlagPanel(lastFlag: String?, onFlag: (Boolean, FlagReason?, String) -> Unit) {
+    var picked by remember { mutableStateOf<FlagReason?>(null) }
+    var memo by remember { mutableStateOf("") }
     Section(if (lastFlag == null) "방금 런 표시 — 결과는 표시한 뒤 보인다" else "방금 런: ${if (lastFlag == "valid") "유효" else "무효"} (표시 완료)") {
         if (lastFlag != null) return@Section
-        Text("무효라면 절차 사유를 고른다 (여러 개 가능)", fontSize = 12.sp, color = Subtle)
-        InvalidReason.entries.chunked(2).forEach { pair ->
+        Text("무효라면 절차 사유 하나를 고른다. 신호 값은 사유가 아니다", fontSize = 12.sp, color = Subtle)
+        FlagReason.entries.chunked(2).forEach { pair ->
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 pair.forEach { r ->
                     FilterChip(
-                        selected = r in picked,
-                        onClick = { picked = if (r in picked) picked - r else picked + r },
+                        selected = r == picked,
+                        onClick = { picked = if (r == picked) null else r },
                         label = { Text(r.label, fontSize = 12.sp) },
                     )
                 }
             }
         }
+        OutlinedTextField(
+            value = memo, onValueChange = { memo = it }, singleLine = true,
+            label = { Text(if (picked?.needsMemo == true) "메모 (필수)" else "메모 (선택)") },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        val memoOk = picked?.needsMemo != true || memo.isNotBlank()
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { onFlag(true, emptyList()) }, enabled = picked.isEmpty(), modifier = Modifier.weight(1f)) {
+            Button(onClick = { onFlag(true, null, memo) }, enabled = picked == null, modifier = Modifier.weight(1f)) {
                 Text("유효")
             }
-            OutlinedButton(onClick = { onFlag(false, picked.toList()) }, enabled = picked.isNotEmpty(), modifier = Modifier.weight(1f)) {
+            OutlinedButton(onClick = { onFlag(false, picked, memo) }, enabled = picked != null && memoOk, modifier = Modifier.weight(1f)) {
                 Text("무효")
             }
         }

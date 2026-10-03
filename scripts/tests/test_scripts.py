@@ -4,7 +4,7 @@
 
     python3 scripts/tests/test_scripts.py        # 전부 PASS 여야 한다
 
-APP_DESIGN 9/29 검토에서 실패했던 경우를 그대로 만든다:
+APP_DESIGN 6.2(3~5) 사양과, 9/29 검토에서 실패했던 경우를 그대로 만든다:
   b1_find   같은 식별자(FD5A)를 쓰는 다른 기기가 많이 섞여도 태그를 찾는가 (식별자로 묶으면 놓친다)
   tag_check 다른 FD5A 기기가 같은 시각에 섞여도 우리 태그 행만으로 구간 RSSI 를 내는가
   m4        위상이 밀리는 데이터에서 고정 위상 적중률이 떨어지는가 (구간마다 다시 맞추면 가려진다)
@@ -45,16 +45,16 @@ def erow(t_ms, ev, val, rows=0, detail=""):
     return f"0,{t_ms},{BOOT + t_ms * 1_000_000},{ev},{val},{rows},1,onResume,100,0,off,usb,80,30.0,0,,on,{detail},t"
 
 
-def raw_capture(path, tag_on, seed):
-    """태그(FD5A, -40) + 같은 식별자 기기 8대(-80, 행 많음) + 가까운 폰(004C, -55) + 잡음 기기들"""
+def raw_capture(path, tag_on, seed, tag_rssi=-40):
+    """태그(FD5A, tag_rssi) + 같은 식별자 기기 8대(-80, 행 많음) + 가까운 폰(004C, -55) + 잡음 기기들"""
     rnd = random.Random(seed)
     with open(path, "w") as f:
         f.write(RAWH + "\n")
         for i in range(4000):
             t = i * 15
             k = i % 10
-            if k == 0 and tag_on:
-                a, r, d, m, leg = "4A:AA:AA:AA:AA:01", -40 + rnd.randint(-2, 2), "FD5A", "0075", "0"
+            if k == 0 and (tag_on or tag_rssi < -60):
+                a, r, d, m, leg = "4A:AA:AA:AA:AA:01", tag_rssi + rnd.randint(-2, 2), "FD5A", "0075", "0"
             elif k in (1, 2, 3, 4, 5):
                 a, r, d, m, leg = f"5{k}:BB:BB:BB:BB:0{rnd.randint(0, 1)}", -80 + rnd.randint(-4, 4), "FD5A", "0075", "1"
             elif k == 6:
@@ -73,57 +73,88 @@ def test_b1(tmp):
     out = run("b1_find.py", on, "--control", off)
     check("b1_find: 같은 식별자 기기 8대가 섞여도 태그 주소를 찾는다",
           "[태그 후보]" in out and "4A:AA:AA:AA:AA:01" in out.split("[태그 후보]")[1].splitlines()[0], out)
-    check("b1_find: 태그 식별자가 TAG 필터와 일치한다고 판정한다", "앱 TAG 필터와 일치" in out, out)
+    check("b1_find: 결론을 사실 세 줄로 — 후보 식별자 / 대조에서 사라짐 / 필터 일치",
+          re.search(r"후보 식별자\s+data=FD5A", out) is not None and re.search(r"대조 캡처에서 사라짐\s+예", out) is not None
+          and re.search(r"TAG 필터\(FD5A/FD59\)와 일치\s+예", out) is not None and "고칠 근거" not in out, out)
     check("b1_find: 태그의 확장 광고(레거시 0%)를 보고한다", "광고 형식 확장만" in out, out)
+    check("b1_find: 순위는 행 10개 이상 주소만, 기본 위 3개", "행 10개 이상" in out
+          and len(re.findall(r"^  [0-9A-F]{2}:[0-9A-F:]{14}\s+-?\d+", out, re.M)) == 3, out)
     out2 = run("b1_find.py", on)
     check("b1_find: --control 없으면 판정 미확정이라고 말한다", "판정 미확정" in out2, out2)
+    # 치운 태그가 다른 방에서 약하게(-95) 계속 들려도 '사라짐'으로 본다
+    weak = os.path.join(tmp, "raw_20261004_100400.csv")
+    raw_capture(weak, False, 5, tag_rssi=-95)
+    out3 = run("b1_find.py", on, "--control", weak)
+    check("b1_find: 치운 태그가 약하게 남아도 후보로 찾는다",
+          "[태그 후보]" in out3 and "4A:AA:AA:AA:AA:01" in out3.split("[태그 후보]")[1].splitlines()[0], out3)
 
 
-def test_tag_check(tmp):
-    st = "20261005_141200"
+def tag_run(tmp, st, other_rssi, other_every=1, countdown=10):
+    """우리 태그(-60, 70 s 에 주소 교체, 가림 구간 -68) + 같은 시각의 다른 FD5A 기기 (한 주소, other_rssi).
+    카운트다운 countdown 초 → 런 시계 0, 30 s 가림 · 90 s 나옴 · 120 s 끝 (앱이 쓰는 이벤트 그대로)"""
+    c0 = countdown * 1000
     with open(os.path.join(tmp, f"events_{st}.csv"), "w") as f:
         f.write(EH + "\n")
         f.write(erow(3, "scan_start", "1", detail=f"pre_ns={BOOT} post_ns={BOOT + 2_000_000}") + "\n")
-        for v, t in (("10", 10000), ("30", 40000), ("90", 100000), ("120", 130000)):
-            f.write(erow(t, "timer", v) + "\n")
-        f.write(erow(140000, "run_flag", "valid") + "\n")
+        f.write(erow(c0, "timer", str(countdown), detail="run_clock_s=0 countdown_end") + "\n")
+        f.write(erow(c0 + 30000, "timer", "30", detail="run_clock_s=30") + "\n")
+        f.write(erow(c0 + 30000, "block_in_planned", "1", detail="pos=mid") + "\n")
+        f.write(erow(c0 + 90000, "timer", "90", detail="run_clock_s=90") + "\n")
+        f.write(erow(c0 + 90000, "block_out_planned", "1", detail="pos=mid") + "\n")
+        f.write(erow(c0 + 120000, "timer", "120", detail="run_clock_s=120") + "\n")
+        f.write(erow(c0 + 121000, "run_flag", "invalid", detail="reason=other memo=test") + "\n")
+    json.dump({"mode": "TAG", "run": {"duration_s": 120}, "scan": {"legacy": False, "phy": "LE_1M"},
+               "precheck": {"alarm_volume": 5, "alarm_max": 7, "smartthings_closed": True}},
+              open(os.path.join(tmp, f"meta_{st}.json"), "w"))
     rnd = random.Random(3)
-    with open(os.path.join(tmp, f"tag_{st}.csv"), "w") as f:
+    path = os.path.join(tmp, f"tag_{st}.csv")
+    with open(path, "w") as f:
         f.write("rx_wall_ms,rx_elapsed_ms,ts_nanos,address,rssi,is_legacy,primary_phy,secondary_phy,adv_sid,"
                 "svc_uuid,svc_data_hex,scan_seq,cond\n")
-        t = 500
-        while t < 130000:
-            rc = (t - 10000) / 1000
+        t, i = 500, 0
+        while t < c0 + 120000:
+            rc = (t - c0) / 1000
             r = -60 + (-8 if 30 <= rc < 90 else 0) + rnd.randint(-1, 1)
-            a = "5A:11:11:11:11:11" if t < 70000 else "6B:22:22:22:22:22"     # 주소 교체
+            a = "5A:11:11:11:11:11" if t < c0 + 60000 else "6B:22:22:22:22:22"     # 주소 교체
             f.write(f"0,{t + 15},{BOOT + t * 1_000_000},{a},{r},0,1,2,3,FD5A,aa,1,c\n")
-            # 같은 시각의 다른 FD5A 기기 (-90, 거의 같은 빈도) — 섞이면 구간 평균이 오염된다
-            f.write(f"0,{t + 20},{BOOT + (t + 5) * 1_000_000},9C:99:99:99:99:99,{-90 + rnd.randint(-1, 1)},0,1,2,3,FD5A,bb,1,c\n")
-            t += 2000
-    path = os.path.join(tmp, f"tag_{st}.csv")
-    # 다른 기기가 런 내내 한 주소로 보이고 우리 태그는 주소를 바꾼다 → 행 수만으로는 가를 수 없다
-    out0 = run("tag_check.py", path)
-    check("tag_check: 사슬이 둘 다 그럴듯하면 '모호'라고 경고한다 (조용히 섞지 않음)", "!! 모호" in out0, out0)
-    out = run("tag_check.py", path, "--addr", "5A:11:11:11:11:11,6B:22:22:22:22:22")
-    def seg(name):
-        m = re.search(r"^\s+" + name + r"\s+[\d~]+\s+s\s+n=\s*\d+\s+평균\s+(-?\d+\.\d)", out, re.M)
-        return float(m.group(1)) if m else None
-    a, b = seg(r"무가림\(앞\)"), seg("가림")
-    check("tag_check: 다른 FD5A 기기를 빼고 구간 RSSI 를 낸다 (가림 ≈ -68, 앞 ≈ -60)",
-          a is not None and b is not None and abs(a + 60) < 1.5 and abs(b + 68) < 1.5, out)
-    check("tag_check: --addr 로 준 사슬만 쓰고 9C 는 다른 기기로 뺀다",
-          "5A:11:11:11:11:11" in out and "6B:22:22:22:22:22" in out and "다른 기기 1개" in out, out)
+            if i % other_every == 0:
+                f.write(f"0,{t + 20},{BOOT + (t + 5) * 1_000_000},9C:99:99:99:99:99,"
+                        f"{other_rssi + rnd.randint(-1, 1)},0,1,2,3,FD5A,bb,1,c\n")
+            t += 2000; i += 1
+    return path
 
-    # 다른 기기가 띄엄띄엄(행 적게) 보이면 자동으로 우리 태그 사슬을 고른다
-    with open(path) as f:
-        lines = f.read().splitlines()
-    keep = [lines[0]] + [l for i, l in enumerate(lines[1:]) if "9C:99" not in l or i % 10 == 1]
-    open(path, "w").write("\n".join(keep) + "\n")
-    out2 = run("tag_check.py", path)
-    a2, b2 = None, None
-    m = re.search(r"^\s+가림\s+[\d~]+\s+s\s+n=\s*\d+\s+평균\s+(-?\d+\.\d)", out2, re.M)
-    check("tag_check: 다른 기기가 드문드문이면 자동 사슬로 맞는 구간 RSSI (가림 ≈ -68)",
-          "!! 모호" not in out2 and m is not None and abs(float(m.group(1)) + 68) < 1.5, out2)
+
+def seg(out, name):
+    m = re.search(r"^\s+" + name + r"\s+[\d~]+\s+s\s+n=\s*\d+\s+평균\s+(-?\d+\.\d)", out, re.M)
+    return float(m.group(1)) if m else None
+
+
+def test_tag_check(tmp):
+    ok_rssi = lambda out: (seg(out, r"무가림\(앞\)") is not None and seg(out, "가림") is not None
+                           and abs(seg(out, r"무가림\(앞\)") + 60) < 1.5 and abs(seg(out, "가림") + 68) < 1.5)
+
+    # 다른 FD5A 기기가 같은 시각에 같은 빈도로 섞여도(-90) 가장 센 주소 + 주소 교체로 우리 태그만 쓴다
+    p = tag_run(tmp, "20261005_141200", -90)
+    out = run("tag_check.py", p)
+    check("tag_check: [0] 주소별 표(행·pkt/s·중앙값·처음·마지막)를 먼저 낸다",
+          "[0] 주소별" in out and re.search(r"9C:99:99:99:99:99\s+\d+\s+[\d.]+\s+-9\d", out) is not None, out)
+    check("tag_check: 다른 기기를 빼고 주소 교체를 이어 구간 RSSI (앞 ≈ -60, 가림 ≈ -68)",
+          "!! 모호" not in out and ok_rssi(out) and "바뀐 횟수 1" in out, out)
+
+    # 같은 시각에 비슷한 세기(-61)의 다른 기기 → 세기로 못 가른다 → 모호 경고, --addr 로 해결
+    p = tag_run(tmp, "20261005_141500", -61)
+    out0 = run("tag_check.py", p)
+    check("tag_check: 같은 시각 비슷한 세기의 기기가 있으면 '모호'라고 경고한다", "!! 모호" in out0, out0)
+    out = run("tag_check.py", p, "--addr", "5A:11:11:11:11:11,6B:22:22:22:22:22")
+    check("tag_check: --addr 로 준 주소만 쓰고 9C 는 다른 기기로 뺀다",
+          ok_rssi(out) and "다른 기기 1개" in out and "!! 모호" not in out, out)
+
+    # 카운트다운 길이가 바뀌어도 countdown_end 로 런 시계 0 을 찾는다 (value="10" 에 기대지 않음)
+    p = tag_run(tmp, "20261005_142000", -90, countdown=15)
+    out = run("tag_check.py", p)
+    check("tag_check: 카운트다운 15 s 런도 구간을 맞게 자른다", ok_rssi(out), out)
+    check("tag_check: [5] 는 '스택 타임스탬프 → 앱 콜백 지연', [7] 은 사유·메모와 precheck 를 읽는다",
+          "스택 타임스탬프 → 앱 콜백 지연" in out and "reason=other memo=test" in out and "알람 5/7" in out, out)
 
 
 def beacon_run(tmp, st, gen, cut_extra=False):
@@ -173,6 +204,26 @@ def test_m4(tmp):
         m = re.search(r"행 가중 평균 ([0-9.]+)\s+vs 우연 평균 ([0-9.]+) · 95% ([0-9.]+)", out)
         ok = m is not None and float(m.group(1)) <= float(m.group(3)) + 0.02
         check(f"m4: 무작위 {dur}s — 적중률이 시뮬레이션 우연 수준 안", ok, out)
+
+    # --fit-on: ch37 런에서 D 를 찾고 ch38 런을 채점 (찾은 데이터 ≠ 채점 데이터 → 우연 1/3)
+    p37 = beacon_run(tmp, "20261006_103000", list(slotted(37, 4.096, 0.0, 0, 280, rnd)))
+    p38 = beacon_run(tmp, "20261006_103500", list(slotted(38, 4.096, 0.0, 0, 280, rnd)))
+    out = run("m4_channel.py", p38, "--fit-on", p37)
+    m = re.search(r"\[1\][^\n]*\n\s+ch38: ([0-9.]+)", out)
+    check("m4: --fit-on 다른 런에서 찾은 D 로 채점 — 우연 0.333, ch38 적중 ≈ 1",
+          "다른 런" in out and "우연 = 0.333" in out and m is not None and float(m.group(1)) > 0.9
+          and "[3]" not in out, out)
+
+    # 섞은 시각열 우연 수준의 오경보율 — 채널과 무관한 60 s 런 20개 중 '95% 초과'는 기대 1개 (5%)
+    fp = 0
+    for k in range(20):
+        r2 = random.Random(100 + k)
+        g = [(37, r2.uniform(0, 60)) for _ in range(180)]
+        p = beacon_run(tmp, f"20261007_1{k:02d}000", g)
+        out = run("m4_channel.py", p, "--null", "40")
+        m = re.search(r"행 가중 평균 ([0-9.]+)\s+vs 우연 평균 ([0-9.]+) · 95% ([0-9.]+)", out)
+        fp += m is not None and float(m.group(1)) > float(m.group(3))
+    check(f"m4: 무관한 60 s 런 20개 중 우연 95% 초과 {fp}개 (기대 1, 3 이하면 통과)", fp <= 3)
 
     # 290 s 넘은 행은 뺀다
     g = list(slotted(37, 4.096, 0.0, 0, 280, rnd)) + [(37, rnd.uniform(300, 360)) for _ in range(50)]

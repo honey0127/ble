@@ -18,7 +18,7 @@ import android.os.PowerManager
 import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import com.knu.blechprobe.model.AutoChecks
-import com.knu.blechprobe.model.InvalidReason
+import com.knu.blechprobe.model.FlagReason
 import com.knu.blechprobe.model.ManualChecks
 import com.knu.blechprobe.model.Mode
 import com.knu.blechprobe.model.blockers
@@ -34,7 +34,6 @@ import com.knu.blechprobe.parse.TagFilter
 import com.knu.blechprobe.parse.toHex
 import com.knu.blechprobe.source.SampleListener
 import com.knu.blechprobe.source.SampleSource
-import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileWriter
@@ -69,7 +68,7 @@ class Collector(private val ctx: Context) : SampleSource {
     private val phone = PhoneState(ctx)
     private val main = Handler(Looper.getMainLooper())
     private val formStore = FormStore(ctx)
-    private val preflight = Preflight(ctx)
+    private val precheck = PreCheck(ctx)
     private val listeners = CopyOnWriteArrayList<SampleListener>()
 
     private val lock = Any()
@@ -109,7 +108,7 @@ class Collector(private val ctx: Context) : SampleSource {
     /** RAW 를 TAG 와 같은 스캔 설정(확장 광고 포함)으로 받을지. 앱을 켤 때마다 꺼진 상태로 시작한다 */
     @Volatile var rawExtended = false
 
-    /** 시작 전 점검 중 사람이 확인하는 것. 앱을 다시 켜면 처음부터 다시 확인한다 */
+    /** 시작 전 점검 중 사람이 확인하는 것. 배치(배치 번호·날)가 바뀌면 처음부터 다시 확인한다 */
     @Volatile var manual = ManualChecks()
 
     /** 알림음 시험 — 사람 가림 런 전에 실제로 들리는지 확인한다 */
@@ -119,13 +118,17 @@ class Collector(private val ctx: Context) : SampleSource {
     }
 
     /** '들렸다' — 그때의 알람 음량을 기억한다. 음량이 바뀌면 다시 시험해야 한다 */
-    fun confirmBeep() { manual = manual.copy(beepHeardAtVolume = preflight.read().alarmVolume) }
+    fun confirmBeep() { manual = manual.copy(beepHeardAtVolume = precheck.read().alarmVolume) }
 
     /** TAG 조건 입력. 바꿀 때마다 저장해서 앱을 다시 켜도 남는다 */
     @Volatile var form: TagForm = formStore.load()
         private set
 
-    fun updateForm(f: TagForm) { form = f; formStore.save(f) }
+    fun updateForm(f: TagForm) {
+        // 새 배치 = 폰·태그를 새로 놓은 것 → SmartThings·연결·태그 모드·알림음도 다시 확인한다
+        if (f.placement != form.placement || f.day != form.day) manual = ManualChecks()
+        form = f; formStore.save(f)
+    }
 
     /** 마지막으로 알려진 Activity 생명주기. 이벤트 행마다 같이 적힌다 */
     @Volatile private var activityState = "-"
@@ -180,7 +183,7 @@ class Collector(private val ctx: Context) : SampleSource {
             if (miss.isNotEmpty()) { postNotice("먼저 채우세요: ${miss.joinToString(", ")}"); return false }
             tag = f.condCode()
         }
-        val auto = preflight.read()
+        val auto = precheck.read()
         val manualNow = manual
         val block = blockers(if (m == Mode.TAG) f.runType else null, auto, manualNow)
         if (block.isNotEmpty()) {
@@ -247,9 +250,9 @@ class Collector(private val ctx: Context) : SampleSource {
 
         meta = RunMeta.build(
             ctx, stamp, m, tag, runForm, runType, cfg,
-            file!!.name, eventFile!!.name, adapter,
+            file!!.name, eventFile!!.name, adapter, tagNormalConfirmed = manualNow.tagNormalMode,
         ).also {
-            it.put("preflight", Preflight.toJson(auto, manualNow))
+            it.put("precheck", PreCheck.toJson(auto, manualNow))
             RunMeta.write(metaFile!!, it)
         }
 
@@ -297,24 +300,29 @@ class Collector(private val ctx: Context) : SampleSource {
 
     /**
      * 끝난 런에 유효/무효를 표시한다. 런이 끝난 뒤에만 폰을 만진다는 규칙 때문에 여기서 받는다.
-     * events 에 run_flag 행을 덧붙이고 meta 의 result.flag 를 고친다.
+     * events 에 run_flag 행(detail = "reason=<code> memo=<…>")을 덧붙이고
+     * meta 의 result.flag · flag_reason · flag_memo 를 고친다.
      * 한 번 표시하면 바꿀 수 없다 — 표시 전에는 화면에서 결과(pkt/s·RSSI)를 가리므로,
-     * 결과를 보고 표시를 바꾸는 일이 없게 하려는 것이다.
+     * 결과를 보고 표시를 바꾸는 일이 없게 하려는 것이다. 무효 런 파일은 지우지 않는다.
      */
-    fun flagLastRun(valid: Boolean, reasons: List<InvalidReason>): Boolean {
+    fun flagLastRun(valid: Boolean, reason: FlagReason?, memo: String): Boolean {
         if (running) return false
         val target = synchronized(lock) { if (flagValue != null) null else flagTarget } ?: return false
-        if (!valid && reasons.isEmpty()) return false          // 무효는 절차 사유를 골라야 한다
+        val note = memo.trim().replace(Regex("\\s+"), " ")
+        if (!valid && reason == null) return false                      // 무효는 절차 사유를 골라야 한다
+        if (!valid && reason!!.needsMemo && note.isEmpty()) return false // 기타는 메모가 있어야 한다
         val value = if (valid) "valid" else "invalid"
-        val codes = if (valid) emptyList() else reasons.map { it.code }
-        val reason = codes.joinToString("|")
-        val (e, line) = eventLine("run_flag", value, reason, withHeadroom = false)
+        val code = if (valid) null else reason!!.code
+        val detail = (if (code != null) "reason=$code" else "") +
+            (if (note.isNotEmpty()) (if (code != null) " " else "") + "memo=$note" else "")
+        val (e, line) = eventLine("run_flag", value, detail, withHeadroom = false)
         try { FileWriter(target, true).use { it.write(line + "\n") } } catch (_: IOException) { return false }
         synchronized(lock) { eventRows++; flagValue = value }
         for (l in listeners) l.onEvent(e)
         meta?.let { j ->
-            j.getJSONObject("result").put("flag", value).put("flag_reason", reason)
-                .put("flag_reasons", JSONArray(codes))
+            j.getJSONObject("result").put("flag", value)
+                .put("flag_reason", code ?: JSONObject.NULL)
+                .put("flag_memo", note.ifEmpty { null } ?: JSONObject.NULL)
             metaFile?.let { RunMeta.write(it, j) }
         }
         return true
@@ -532,7 +540,7 @@ class Collector(private val ctx: Context) : SampleSource {
         val now = SystemClock.elapsedRealtime()
         val c = autoCache
         if (c != null && now - autoAt < 1_000L) return c
-        return preflight.read().also { autoCache = it; autoAt = now }
+        return precheck.read().also { autoCache = it; autoAt = now }
     }
 
     fun snapshot(): UiState {

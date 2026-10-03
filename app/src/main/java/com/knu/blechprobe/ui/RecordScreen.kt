@@ -116,7 +116,7 @@ fun RecordScreen(
         }
 
         ui.auto?.let { a ->
-            PreflightSection(
+            PreCheckSection(
                 a, ui.manual, ui.blockers, personRun = mode == Mode.TAG && form.runType.blockInS != null,
                 onManual = { collector.manual = it },
                 onTestBeep = { collector.testBeep() },
@@ -160,8 +160,8 @@ fun RecordScreen(
         if (notice.isNotEmpty()) Notice(notice, Color(0xFFFEF2F2))
 
         /* 끝난 런 표시 — 런이 끝난 뒤에만 폰을 만진다 */
-        if (ui.canFlag) FlagPanel(ui.lastFlag) { valid, reasons ->
-            notice = if (collector.flagLastRun(valid, reasons))
+        if (ui.canFlag) FlagPanel(ui.lastFlag) { valid, reason, memo ->
+            notice = if (collector.flagLastRun(valid, reason, memo))
                 "표시함: ${if (valid) "유효" else "무효"}" else "표시하지 못했습니다."
         }
 
