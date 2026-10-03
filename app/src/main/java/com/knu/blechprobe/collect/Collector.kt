@@ -473,8 +473,8 @@ class Collector(private val ctx: Context) : SampleSource {
         val s = Sample(
             rxWallMs = wall,
             rxElapsedMs = elapsed,
-            // 공식 문서: "부팅 후, 스캔 레코드가 관측된 시각". 컨트롤러 시각인지 호스트 처리 시각인지는
-            // 문서에 없다 [미검증]. elapsedRealtimeNanos 와 같은 시계라 이벤트 CSV 와 맞댈 수 있다
+            // 블루투스 서비스가 결과를 만들 때 넣는 호스트 시각(elapsedRealtimeNanos) [문헌: AOSP 12L GattService,
+            // Android 16 미확인]. 이벤트 CSV 의 ts_nanos 와 같은 시계라 그대로 맞댈 수 있다
             tsNanos = result.timestampNanos,
             address = result.device?.address ?: "??",
             rssi = result.rssi,

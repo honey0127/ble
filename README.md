@@ -86,12 +86,12 @@ Phase 0 측정에는 지장이 없다.
 - `channel_id` — 비콘이 적어 보낸 라벨. `37|38|39`, 그리고 `0 = ALL_CONTROL`
   (모드 표식이며 RF 채널 아님. 화면에는 `ALL*` 로 표시)
 - `tag` — 실험 조건 문자열. **비어 있으면 앱이 시작을 거부한다**
-- `ts_nanos` — `ScanResult.getTimestampNanos()`. 공식 문서가 말하는 것은 "부팅 후,
-  스캔 레코드가 관측된 시각"까지다 [공식]. **컨트롤러가 받은 시각인지 호스트가 처리한
-  시각인지는 문서에 없다 [미검증]** — 9/27 판 README·주석의 "컨트롤러 관측 시각,
-  전달 지연 제외"는 근거 없는 서술이었다. `elapsedRealtimeNanos` 와 같은 시계라
-  이벤트 CSV 와 그대로 맞댈 수 있다. `rx_elapsed_ms` 는 콜백이 불린 시각이다.
-  패킷 간격·M4 분석의 기준 시각으로 쓰되, 두 시각의 차이 자체가 확인 대상이다
+- `ts_nanos` — `ScanResult.getTimestampNanos()`. 공식 문서: "부팅 후, 스캔 레코드가 관측된
+  시각" [공식]. AOSP 코드상 블루투스 서비스가 결과를 만들 때 넣는 `elapsedRealtimeNanos()`
+  — **호스트 시각이다, 컨트롤러 수신 시각이 아니다** [문헌: Android 12L 계열 GattService,
+  Android 16 코드는 미확인]. HCI 광고 보고에는 시각 필드가 없다. 이벤트 CSV 와 같은 시계라
+  그대로 맞댈 수 있다. `rx_elapsed_ms` 는 앱 콜백 시각이라 둘의 차이는 서비스 → 앱 전달 지연이다.
+  채널 역산에 충분히 정확한지는 M4 가 직접 보여 준다
 - `svc_data_uuids`, `svc_uuids`, `mfg_ids` (RAW, 9/29) — 광고에 든 서비스 데이터 UUID ·
   광고 서비스 UUID · 제조사 ID (`|` 로 이음). B1(태그가 어떤 식별자로 광고하나) 찾기용 (10장)
 - `is_legacy`, `primary_phy`, `secondary_phy`, `adv_sid`, `adv_hex` (RAW, 10/3) — 광고 형식과
@@ -416,9 +416,10 @@ ui/        RecordScreen(① 측정) TagFormSection
 | `raw_check.py <raw.csv>` | A3 1단계 | 0 인 분이 있나 (콜백 생존) |
 | `raw_breakdown.py <raw.csv> [분 MAC]` | A3 2·4단계 | 급락이 수신기 측인가 환경 측인가, 고정 MAC 배율 |
 | `events_view.py <events.csv>` | A3 3단계 | 10초 처리량과 상태 변화를 시간순으로. 가장 큰 낙폭(▼)과 그 ±20초 이벤트 |
-| `b1_find.py <raw.csv>` | B1·B9 | 태그를 폰에 붙이고 **RAW 확장 포함** 1분 → 가장 센 기기의 식별자가 TAG 필터(FD5A/FD59)와 같은가, legacy/확장 비율, 광고 원본 AD 구조 |
-| `tag_check.py <tag.csv> [--margin 3]` | TAG 런마다 | 수집량·공백, legacy/PHY(B9), 주소 교체(T2), 수신 간격, 콜백−ts_nanos 시각 차이, 구간별 RSSI, 표시·사유·시작 전 점검·스캔 설정 |
-| `m4_channel.py <beacon.csv> [--dwell D]` | M4 | FIXED 채널 런의 받은 시각이 채널 시간대에 몰리나. D 탐색, 경과 시간별 적중률. **스캔 설정이 TAG 와 다르면 경고** |
+| `b1_find.py 붙인.csv --control 치운.csv` | B1·B9 | **주소별** 순위. 태그를 치우면 사라지는 센 주소 = 태그 → 그 식별자가 TAG 필터(FD5A/FD59)와 같은가, legacy 비율, 광고 원본 AD 구조, 주변 같은 식별자 기기 수. `--control` 없으면 판정 미확정 |
+| `tag_check.py <tag.csv> [--addr A,B] [--margin 3]` | TAG 런마다 | **우리 태그 주소 사슬의 행만** 쓴다(시간 구간이 안 겹치는 주소 조합 중 행이 가장 많은 것, 비슷한 다른 사슬이 있으면 '모호' 경고 → `--addr`). 수집량·공백, legacy/PHY, 주소 교체, 수신 간격, 콜백 지연, 구간별 RSSI, 표시·점검 |
+| `m4_channel.py <beacon.csv> --dwell D [--offset S]` | M4 | 주 지표 = **예측 구간 적중률**(scan_start 기준 37→38→39, 맞춤 없음, 우연 1/3). 고정 위상 적중률의 시간 변화(드리프트), 맞춘 위상 적중률 + 시뮬레이션 우연 수준, ALL 런 대조군. 스캔 시작 후 290 s 넘은 행은 뺀다(S25 타임아웃 300 s) |
+| `tests/test_scripts.py` | 고칠 때마다 | 정답을 아는 합성 데이터로 반례 14건 — 전부 PASS 여야 한다 |
 
 합성 데이터로 확인한 것 (정답을 심어 두고 찾는지 봤다):
 

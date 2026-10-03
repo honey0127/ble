@@ -8,7 +8,8 @@ data class ServiceData(val uuid: String, val hex: String)
 /**
  * 받은 패킷 1개. 실시간 수집과 (GO 이후) 기록 재생이 같은 모양을 쓴다.
  * @param tsNanos ScanResult.getTimestampNanos(). 공식 문서: "부팅 후, 스캔 레코드가 관측된 시각".
- *                컨트롤러 수신 시각인지 호스트 처리 시각인지는 문서에 없다 [미검증]
+ *                AOSP 코드상 블루투스 서비스가 결과를 만들 때 넣는 elapsedRealtimeNanos() — 호스트 시각이다
+ *                [문헌: Android 12L 계열 GattService, Android 16 코드는 미확인]. 컨트롤러 수신 시각이 아니다
  * @param scanSeq 런 안에서 몇 번째 스캔 세션인가 (1부터). 재시작 뒤 채널 위상 기준
  */
 data class Sample(

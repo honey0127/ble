@@ -41,7 +41,11 @@ UUID·회사 소유자 (Bluetooth SIG assigned numbers): FEF3·FCF1·FE2C = Goog
   이 로그상 원인이 아니다 (9/22 의 '화면/포그라운드' 후보는 배제)
 - 듀티사이클 강등이면 모든 기기가 고르게 줄어야 하는데, **특정 종류(Google 서비스 광고)만 남았다.**
   우리 스캔이 opportunistic 으로 바뀌어 다른 앱(Play 서비스 등)의 필터 스캔 결과만 받는 모양과 맞는다.
-  AOSP 기본은 30분(Android 7+)인데 여기서는 5분 — 제조사·OS 설정값일 수 있다 [미검증]
+  AOSP 블루투스 모듈(Android 16 계열) `ScanManager` 는 스캔을 시작할 때 타임아웃을 예약하고, 시간이 되면
+  무필터 스캔을 opportunistic 으로 옮긴다("Moving unfiltered scan client to opportunistic scan") [문헌].
+  기본값은 10분(`DEFAULT_SCAN_TIMEOUT_MILLIS`)이고 DeviceConfig `bluetooth/scan_timeout_millis` 로 바뀐다 [문헌].
+  흔히 인용되는 "30분"은 옛 값이다. S25 의 300 s 는 이 값이 300000 인 경우로 보인다 [추론] —
+  `adb shell device_config get bluetooth scan_timeout_millis` 로 확인
 - 확정은 logcat 으로 한다: 그 시각에 `BtGatt.ScanManager` 의 opportunistic 전환 로그가 찍히는지
 
 TAG 측정에 주는 뜻:
@@ -77,7 +81,7 @@ TAG 측정에 주는 뜻:
 | 충전 상태 변화 | 미검증 | events: `plugged` |
 | 주변 기기 밀도 변화 (환경) | 정황상 약함 (90% 동시 소멸) | 고정 주소 ESP32 행의 배율 |
 | 이벤트 로그가 못 잡는 원인 (제조사 스캔 정책 등) | 미검증 | 위가 전부 그대로인데 꺾이면 이쪽 |
-| ~~장기 스캔 강등 (Android 7+)~~ | **제외** | 30분 넘은 스캔을 opportunistic 으로 돌리는 규칙이라 5분 급락을 설명하지 못한다 ([출처](https://stackoverflow.com/questions/47523245/keep-the-android-bluetooth-scanning-but-it-stops-itself)) |
+| **스캔 타임아웃 → opportunistic 전환** | **유력 (10/3)** | 9/22 에 "30분 규칙이라 5분을 설명 못 한다"며 제외했으나 틀렸다 — 30분은 옛 값이고 지금 AOSP 기본 10분, 기기 설정으로 바뀐다. 10/3 측정이 정확히 300 s 계단형. logcat·`device_config` 로 확정 |
 
 ---
 
@@ -135,6 +139,19 @@ TAG 측정에 주는 뜻:
 APP_DESIGN 6.2a 원문은 저장소에 없어서, 사유 칩 6개의 이름·코드와 점검 항목 표시는 요청 문장을
 바탕으로 정했다. 6.2a 와 다르면 `model/Flag.kt` 한 파일만 고치면 된다.
 
+## 10/3 저녁 — 프로젝트 STATUS 검토 반영
+
+- 스캔 타임아웃 서술 정정: 기본 10분·`scan_timeout_millis` [문헌], 필터 스캔도 같은 시각에 강등 → 필터 스캔 옵션은 만들지 않는다.
+  원인 후보 표의 "장기 스캔 강등 — 제외"는 틀렸다(유력으로 바꿈)
+- 스크립트 3개 수정 (APP_DESIGN 6.2 의 3~5 원문은 이 저장소에 없어서, 프로젝트 STATUS 에 적힌 실패 요약을 기준으로 했다)
+  - `b1_find`: 주소별 순위 + `--control`(태그를 치운 캡처) — 치우면 사라지는 센 주소를 태그로
+  - `tag_check`: 우리 태그 주소 사슬만으로 계산, 비슷한 다른 사슬이 있으면 '모호' 경고·`--addr`
+  - `m4_channel`: 예측 구간 적중률(주 지표), 고정 위상 시간 변화, 시뮬레이션 우연 수준, ALL 대조군, 290 s 컷
+  - `scripts/tests/test_scripts.py` 반례 14건 PASS. 프로젝트의 `adversarial_cases.py` 를 `scripts/tests/` 에 넣으면 그것도 돌려 맞춘다
+  - 고치다 생긴 버그(`tag_check` 의 `stats()` 를 지움)를 이 시험이 잡았다
+- `ts_nanos` = AOSP 코드상 호스트 시각 [문헌] — 주석·README·`tag_check` [5] 정정
+- `scripts/__pycache__` 를 저장소에서 지우고 `.gitignore` 에 추가
+
 ## 열린 문제
 
 - **9/27 이후 변경분 실기기 빌드** — 컴파일 검사만 통과한 상태 (FileProvider·공유 시트는 실기기에서만 확인된다)
@@ -156,7 +173,8 @@ APP_DESIGN 6.2a 원문은 저장소에 없어서, 사유 칩 6개의 이름·코
    - `adb logcat -v time | grep -iE "ScanManager|opportunistic|too frequently|scan timeout"` 를 켠 채
      RAW 6분 → 300 s 근처에 전환 로그가 찍히나
    - 5분 시계가 `startScan` 마다 새로 시작하나: RAW 4분 정지 → 바로 RAW 4분 (두 번째 런이 4분 내내 유지되면 런마다 리셋)
-   - 필터 스캔은 피하나: TAG/BEACON 처럼 대상이 정해진 런을 6분 이상 (필터 스캔 옵션은 앱에 아직 없다 — 결과 보고 결정)
+   - ~~필터 스캔이면 피하나~~ — 아니다. 같은 AOSP 코드에서 필터 스캔은 같은 시각에 강등된 스캔 모드로 바뀐다 [문헌].
+     필터 스캔 옵션은 만들지 않는다. 대책은 스캔 한 번을 4분 이하로 두는 것
 3. 태그 도착 → 폰에 붙이고 **RAW 확장 포함** 1분 → `b1_find.py` (B1·B9). 이어서 TAG 모드 무가림 120 s 1회 →
    `tag_check.py` 로 `광고` legacy/확장(B9)·수신 간격·주소 교체 확인
 4. 알림음 들리는지, 사람 가림 30-60-30 런 1회 → `tag_check.py` 구간별 RSSI
