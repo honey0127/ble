@@ -15,8 +15,9 @@ internal object SampleCsv {
     }
 
     fun header(mode: Mode) = when (mode) {
-        // 9/30: svc_data_uuids,svc_uuids,mfg_ids 를 끝에 붙임 (B1 찾기 — scripts/b1_find.py)
-        Mode.RAW -> "rx_wall_ms,rx_elapsed_ms,address,rssi,name,tag,ts_nanos,svc_data_uuids,svc_uuids,mfg_ids"
+        // 9/29: svc_data_uuids,svc_uuids,mfg_ids / 10/3: is_legacy..adv_hex 를 끝에 붙임 (B1·B9 — b1_find.py)
+        Mode.RAW -> "rx_wall_ms,rx_elapsed_ms,address,rssi,name,tag,ts_nanos,svc_data_uuids,svc_uuids,mfg_ids," +
+            "is_legacy,primary_phy,secondary_phy,adv_sid,adv_hex"
         Mode.BEACON ->
             "rx_wall_ms,rx_elapsed_ms,beacon_id,channel_id,seq,rssi,tx_uptime_ms,tx_power_dbm,tag,ts_nanos,address"
         Mode.TAG ->
@@ -27,7 +28,8 @@ internal object SampleCsv {
     /** @param tag RAW·BEACON 은 자유 입력 tag, TAG 는 조건 코드 */
     fun row(mode: Mode, s: Sample, tag: String): String = when (mode) {
         Mode.RAW -> "${s.rxWallMs},${s.rxElapsedMs},${s.address},${s.rssi},${csv(s.name)},${csv(tag)},${s.tsNanos}," +
-            "${s.svcDataUuids},${s.svcUuids},${s.mfgIds}"
+            "${s.svcDataUuids},${s.svcUuids},${s.mfgIds},${bit(s.isLegacy)},${s.primaryPhy},${s.secondaryPhy}," +
+            "${s.advSid},${s.advHex}"
         Mode.BEACON -> {
             val b = s.beacon!!
             "${s.rxWallMs},${s.rxElapsedMs},${b.beaconId},${b.channelId},${b.seq},${s.rssi},${b.uptimeMs}," +

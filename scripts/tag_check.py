@@ -11,13 +11,15 @@ TAG 런 점검 — 런 1개(tag_<stamp>.csv)가 쓸 만하게 모였는지 숫�
   2. 광고 형식    legacy/확장 비율, PHY, adv_sid (B9), 서비스 UUID·페이로드 종류 (B1)
   3. 주소 교체    주소가 몇 번, 언제 바뀌었나 (T2)
   4. 수신 간격    ts_nanos 차이의 분포 — 채널 역산·수신 간격 분석의 바탕
-  5. 전달 지연    rx_elapsed_ms(콜백) − ts_nanos(관측) 의 분포. ts_nanos 가 무슨 시각인지
-                  [미검증] 이라 이 차이 자체가 확인 대상이다
+  5. 시각 차이    rx_elapsed_ms(콜백 시각) − ts_nanos 의 분포. ts_nanos 는 공식 문서상
+                  "부팅 후, 스캔 레코드가 관측된 시각"까지만 확실하고 컨트롤러 시각인지
+                  호스트 처리 시각인지는 [미검증] — 이 차이 자체가 확인 대상이다
+  7. 표시·점검    run_flag(유효/무효 + 절차 사유 코드), 시작 전 점검, 스캔 설정
   6. 구간별 RSSI  알림음 시각으로 나눈 구간(카운트다운 제외, 전환 전후 --margin 초 제외)
 """
 import sys
 from collections import Counter
-from _common import read_csv, read_meta, num, pct, sibling
+from _common import read_csv, read_meta, num, pct, sibling, scan_desc
 
 GAP_S = 5.0
 
@@ -78,13 +80,13 @@ def main(path, margin):
     if gaps:
         print("  " + "  ".join(f"p{q}={pct(gaps, q):.3f}" for q in (10, 50, 90, 99)) + f"  최대={max(gaps):.3f}")
 
-    print("\n[5] 전달 지연 = 콜백 시각 − 관측 시각 (ms)")
+    print("\n[5] 시각 차이 = 콜백 시각 − ts_nanos 시각 (ms)")
     pair = next((e for e in ev if e.get("ts_nanos") and e.get("rx_elapsed_ms")), None)
     if pair:
         off = num(pair["ts_nanos"], int) / 1e6 - num(pair["rx_elapsed_ms"], int)   # 같은 순간의 두 시계 차
         lat = [e - (t / 1e6 - off) for e, t in zip(el, ts) if e is not None and t is not None]
         print("  " + "  ".join(f"p{q}={pct(lat, q):.1f}" for q in (10, 50, 90, 99)))
-        print("  (음수가 많으면 ts_nanos 가 콜백보다 늦은 시각 — 관측 시각이라는 해석이 틀렸다는 신호)")
+        print("  (음수가 많으면 ts_nanos 가 콜백보다 늦다 — '관측 시각'이라고 읽으면 안 된다는 신호)")
     else:
         print("  events 파일이 없어 두 시계를 맞출 수 없다")
 
@@ -100,10 +102,22 @@ def main(path, margin):
             lo, hi = t0 + a + margin, t0 + b - margin
             v = [num(r["rssi"], int) for r, e in zip(rows, el) if lo <= e / 1000.0 < hi]
             print(f"  {name:<9} {a:5.0f}~{b:<5.0f}s  {stats(v)}   {len(v) / (hi - lo) if hi > lo else 0:.2f} pkt/s")
+    print("\n[7] 표시·점검")
     flags = [e for e in ev if e.get("event") == "run_flag"]
     if flags:
         f = flags[-1]
-        print(f"\n런 표시: {f['value']}  {f.get('detail', '')}")
+        print(f"  런 표시: {f['value']}  사유 {f.get('detail', '') or '-'}")
+    else:
+        print("  ! 런 표시 없음 — 유효/무효를 표시하지 않은 런은 분석에서 따로 다룬다")
+    if meta:
+        print(f"  스캔 설정 {scan_desc(meta)}")
+        pf = meta.get("preflight")
+        if pf:
+            bad = [k for k in ("smartthings_closed", "wearables_off", "tag_normal_mode", "beep_heard") if pf.get(k) is False]
+            print(f"  시작 전 점검  알람 {pf.get('alarm_volume')}/{pf.get('alarm_max')}  방해금지 {pf.get('dnd')}  "
+                  f"절전 {pf.get('power_save')}  충전 {pf.get('plugged')}  Wi-Fi {pf.get('wifi_on')}")
+            if bad:
+                print(f"  ! 사람이 확인 안 한 항목: {', '.join(bad)}")
     print()
 
 

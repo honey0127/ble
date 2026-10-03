@@ -30,4 +30,11 @@ data class UiState(
     /* 끝난 런의 유효/무효 표시 */
     val canFlag: Boolean = false,
     val lastFlag: String? = null,
+    /** 측정 중이거나 끝난 런을 아직 표시하지 않았으면 결과(pkt/s·RSSI)를 가린다 */
+    val blind: Boolean = false,
+    /* 시작 전 점검 — 측정 중에는 auto 가 null */
+    val auto: AutoChecks? = null,
+    val manual: ManualChecks = ManualChecks(),
+    /** 지금 고른 런을 막는 이유 (사람 가림 런만) */
+    val blockers: List<String> = emptyList(),
 )

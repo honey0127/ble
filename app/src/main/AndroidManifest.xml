@@ -16,6 +16,9 @@
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
 
+    <!-- 시작 전 점검에서 Wi-Fi 켜짐 여부만 읽는다 (일반 권한, 팝업 없음) -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
 
     <application
@@ -39,5 +42,15 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- 하루치 측정 zip 을 공유 시트로 내보낸다. exports/ 만 노출 (res/xml/file_paths.xml) -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>

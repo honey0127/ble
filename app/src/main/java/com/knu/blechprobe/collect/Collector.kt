@@ -17,7 +17,11 @@ import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import androidx.core.content.ContextCompat
+import com.knu.blechprobe.model.AutoChecks
+import com.knu.blechprobe.model.InvalidReason
+import com.knu.blechprobe.model.ManualChecks
 import com.knu.blechprobe.model.Mode
+import com.knu.blechprobe.model.blockers
 import com.knu.blechprobe.model.RunEvent
 import com.knu.blechprobe.model.RunType
 import com.knu.blechprobe.model.Sample
@@ -27,8 +31,10 @@ import com.knu.blechprobe.model.UiState
 import com.knu.blechprobe.parse.BeaconParser
 import com.knu.blechprobe.parse.CH_ALL_LABEL
 import com.knu.blechprobe.parse.TagFilter
+import com.knu.blechprobe.parse.toHex
 import com.knu.blechprobe.source.SampleListener
 import com.knu.blechprobe.source.SampleSource
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileWriter
@@ -49,8 +55,10 @@ private const val KEY_TAG = -2
  * 측정 1회 = 파일 3개, 같은 stamp: 데이터(raw_/beacon_/tag_) + events_ + meta_<stamp>.json
  *
  * [중요] 스캔은 측정(런)마다 한 번 시작해 끝까지 유지한다. 런 도중 재시작하지 않는다.
- *        30초에 startScan 5회를 넘기면 시스템이 조용히 결과를 끊기 때문이다.
- *        (Android 공식 문서에 명시된 제한. 앱은 4회에서 미리 막는다)
+ *        30초에 startScan 5회를 넘기면 시스템이 그 스캔을 시작하지 않는다. 에러 콜백 없이
+ *        로그("App ... is scanning too frequently")만 남는다. 공식 문서가 아니라 AOSP 소스
+ *        (Bluetooth AppScanStats: NUM_SCAN_DURATIONS_KEPT=5, EXCESSIVE_SCANNING_PERIOD_MS=30 s,
+ *        Android 7+)의 규칙이다 [AOSP 소스]. 제조사가 바꿨을 수 있다. 앱은 4회에서 미리 막는다
  */
 class Collector(private val ctx: Context) : SampleSource {
 
@@ -61,6 +69,7 @@ class Collector(private val ctx: Context) : SampleSource {
     private val phone = PhoneState(ctx)
     private val main = Handler(Looper.getMainLooper())
     private val formStore = FormStore(ctx)
+    private val preflight = Preflight(ctx)
     private val listeners = CopyOnWriteArrayList<SampleListener>()
 
     private val lock = Any()
@@ -96,6 +105,21 @@ class Collector(private val ctx: Context) : SampleSource {
     @Volatile var tag: String = ""
     @Volatile var running = false
         private set
+
+    /** RAW 를 TAG 와 같은 스캔 설정(확장 광고 포함)으로 받을지. 앱을 켤 때마다 꺼진 상태로 시작한다 */
+    @Volatile var rawExtended = false
+
+    /** 시작 전 점검 중 사람이 확인하는 것. 앱을 다시 켜면 처음부터 다시 확인한다 */
+    @Volatile var manual = ManualChecks()
+
+    /** 알림음 시험 — 사람 가림 런 전에 실제로 들리는지 확인한다 */
+    fun testBeep() {
+        if (running) return
+        Beeper().apply { play(Beeper.Pattern.TWO); releaseLater() }
+    }
+
+    /** '들렸다' — 그때의 알람 음량을 기억한다. 음량이 바뀌면 다시 시험해야 한다 */
+    fun confirmBeep() { manual = manual.copy(beepHeardAtVolume = preflight.read().alarmVolume) }
 
     /** TAG 조건 입력. 바꿀 때마다 저장해서 앱을 다시 켜도 남는다 */
     @Volatile var form: TagForm = formStore.load()
@@ -156,11 +180,17 @@ class Collector(private val ctx: Context) : SampleSource {
             if (miss.isNotEmpty()) { postNotice("먼저 채우세요: ${miss.joinToString(", ")}"); return false }
             tag = f.condCode()
         }
+        val auto = preflight.read()
+        val manualNow = manual
+        val block = blockers(if (m == Mode.TAG) f.runType else null, auto, manualNow)
+        if (block.isNotEmpty()) {
+            postNotice("사람 가림 런을 시작할 수 없습니다: ${block.joinToString(", ")}"); return false
+        }
 
         scanner = adapter.bluetoothLeScanner
         if (scanner == null) { postNotice("BluetoothLeScanner 를 얻지 못했습니다."); return false }
 
-        val cfg = ScanConfig.forMode(m)
+        val cfg = ScanConfig.forMode(m, rawExtended)
         val stamp: String
         synchronized(lock) {
             stats.clear(); totalRows = 0; eventRows = 0
@@ -218,7 +248,10 @@ class Collector(private val ctx: Context) : SampleSource {
         meta = RunMeta.build(
             ctx, stamp, m, tag, runForm, runType, cfg,
             file!!.name, eventFile!!.name, adapter,
-        ).also { RunMeta.write(metaFile!!, it) }
+        ).also {
+            it.put("preflight", Preflight.toJson(auto, manualNow))
+            RunMeta.write(metaFile!!, it)
+        }
 
         registerMonitors()
         runType?.let { scheduleRun(it) }
@@ -264,18 +297,24 @@ class Collector(private val ctx: Context) : SampleSource {
 
     /**
      * 끝난 런에 유효/무효를 표시한다. 런이 끝난 뒤에만 폰을 만진다는 규칙 때문에 여기서 받는다.
-     * events 에 run_flag 행을 덧붙이고 meta 의 result.flag 를 고친다. 다시 누르면 마지막 값이 남는다.
+     * events 에 run_flag 행을 덧붙이고 meta 의 result.flag 를 고친다.
+     * 한 번 표시하면 바꿀 수 없다 — 표시 전에는 화면에서 결과(pkt/s·RSSI)를 가리므로,
+     * 결과를 보고 표시를 바꾸는 일이 없게 하려는 것이다.
      */
-    fun flagLastRun(valid: Boolean, reason: String): Boolean {
+    fun flagLastRun(valid: Boolean, reasons: List<InvalidReason>): Boolean {
         if (running) return false
-        val target = synchronized(lock) { flagTarget } ?: return false
+        val target = synchronized(lock) { if (flagValue != null) null else flagTarget } ?: return false
+        if (!valid && reasons.isEmpty()) return false          // 무효는 절차 사유를 골라야 한다
         val value = if (valid) "valid" else "invalid"
+        val codes = if (valid) emptyList() else reasons.map { it.code }
+        val reason = codes.joinToString("|")
         val (e, line) = eventLine("run_flag", value, reason, withHeadroom = false)
         try { FileWriter(target, true).use { it.write(line + "\n") } } catch (_: IOException) { return false }
         synchronized(lock) { eventRows++; flagValue = value }
         for (l in listeners) l.onEvent(e)
         meta?.let { j ->
             j.getJSONObject("result").put("flag", value).put("flag_reason", reason)
+                .put("flag_reasons", JSONArray(codes))
             metaFile?.let { RunMeta.write(it, j) }
         }
         return true
@@ -450,6 +489,7 @@ class Collector(private val ctx: Context) : SampleSource {
             svcDataUuids = ids.first,
             svcUuids = ids.second,
             mfgIds = ids.third,
+            advHex = if (m == Mode.RAW) toHex(record?.bytes) else "",
         )
         synchronized(lock) {
             val key = when (m) {
@@ -467,7 +507,42 @@ class Collector(private val ctx: Context) : SampleSource {
 
     /* ---------------- 화면용 스냅샷 ---------------- */
 
-    fun snapshot(): UiState = synchronized(lock) {
+    /* ---------------- 하루치 내보내기 ---------------- */
+
+    fun exportDays(): List<Pair<String, Int>> = Exporter.days(ctx)
+
+    /** 그날 파일을 zip 으로 묶는다. 디스크·해시 작업이라 별도 스레드에서 하고 결과는 메인으로 */
+    fun exportDay(day: String, onDone: (File?, String) -> Unit) {
+        if (running) { onDone(null, "측정 중에는 내보내지 않습니다 (쓰는 중인 파일이 있다)"); return }
+        Thread {
+            val r = try {
+                Exporter.exportDay(ctx, day, RunMeta.appVersion(ctx)) to ""
+            } catch (e: Exception) { null to "내보내기 실패: ${e.message}" }
+            main.post { onDone(r.first, r.second) }
+        }.start()
+    }
+
+    /* ---------------- 화면용 스냅샷 ---------------- */
+
+    private var autoCache: AutoChecks? = null
+    private var autoAt = 0L
+
+    /** 시작 전 점검(앱이 읽는 값). 화면이 0.25초마다 부르므로 1초 동안 재사용한다 */
+    private fun autoChecks(): AutoChecks {
+        val now = SystemClock.elapsedRealtime()
+        val c = autoCache
+        if (c != null && now - autoAt < 1_000L) return c
+        return preflight.read().also { autoCache = it; autoAt = now }
+    }
+
+    fun snapshot(): UiState {
+        val auto = if (running) null else autoChecks()   // 측정 중에는 읽지 않는다
+        val man = manual
+        val rtNext = if (mode == Mode.TAG) form.runType else null
+        return synchronized(lock) { snapshotLocked(auto, man, rtNext) }
+    }
+
+    private fun snapshotLocked(auto: AutoChecks?, man: ManualChecks, rtNext: RunType?): UiState {
         // 정지 후에는 시간이 더 흐르지 않아야 한다. 안 그러면 pkt/s 가 계속 내려간다
         val endE = if (endedAtElapsed > 0L) endedAtElapsed else SystemClock.elapsedRealtime()
         val sec = if (startedAtElapsed == 0L) 0.0 else (endE - startedAtElapsed) / 1000.0
@@ -487,7 +562,7 @@ class Collector(private val ctx: Context) : SampleSource {
             )
         }
         val rt = runType
-        UiState(
+        return UiState(
             running = running, mode = mode, elapsedSec = sec, totalRows = totalRows,
             eventRows = eventRows, fileName = fileName, rows = list,
             cond = tag,
@@ -501,6 +576,11 @@ class Collector(private val ctx: Context) : SampleSource {
                 else (endE - startedAtElapsed - (if (lastRowElapsed >= 0) lastRowElapsed else 0L)) / 1000.0,
             canFlag = !running && flagTarget != null,
             lastFlag = flagValue,
+            // 결과를 보고 런을 빼는 일이 없게, 측정 중과 표시 전에는 pkt/s·RSSI 를 가린다
+            blind = running || (flagTarget != null && flagValue == null),
+            auto = auto,
+            manual = man,
+            blockers = if (auto == null) emptyList() else blockers(rtNext, auto, man),
         )
     }
 }

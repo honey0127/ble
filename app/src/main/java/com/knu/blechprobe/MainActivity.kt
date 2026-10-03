@@ -16,6 +16,8 @@ package com.knu.blechprobe
  * ========================================================================== */
 
 import android.Manifest
+import android.content.ClipData
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.os.Build
@@ -30,11 +32,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.lifecycle.ViewModelProvider
 import com.knu.blechprobe.collect.Collector
 import com.knu.blechprobe.collect.CollectorViewModel
 import com.knu.blechprobe.collect.bit
 import com.knu.blechprobe.ui.RecordScreen
+import java.io.File
 import java.util.Locale
 
 class MainActivity : ComponentActivity() {
@@ -84,9 +88,26 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             MaterialTheme {
-                RecordScreen(collector, permGranted, onRequestPerms = { requestPerms.launch(perms) })
+                RecordScreen(
+                    collector, permGranted,
+                    onRequestPerms = { requestPerms.launch(perms) },
+                    onShare = ::shareZip,
+                )
             }
         }
+    }
+
+    /** 내보낸 zip 을 공유 시트로 (드라이브·메일·PC 전송 등). 받는 앱에 읽기 권한만 잠깐 준다 */
+    private fun shareZip(zip: File) {
+        val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", zip)
+        val send = Intent(Intent.ACTION_SEND).apply {
+            type = "application/zip"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            putExtra(Intent.EXTRA_SUBJECT, zip.name)
+            clipData = ClipData.newRawUri(zip.name, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        startActivity(Intent.createChooser(send, "측정 내보내기 — ${zip.name}"))
     }
 
     override fun onStart() {

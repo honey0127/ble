@@ -70,6 +70,7 @@ internal object RunMeta {
             .put("legacy", scan.legacy)
             .put("phy", scan.phyName)
             .put("filter", "none")
+            .put("raw_extended", mode == Mode.RAW && !scan.legacy)
             .put("le_extended_adv_supported", cap { adapter?.isLeExtendedAdvertisingSupported })
             .put("le_coded_phy_supported", cap { adapter?.isLeCodedPhySupported }))
 
@@ -92,6 +93,12 @@ internal object RunMeta {
     }
 
     private fun cap(f: () -> Boolean?): Any = try { f() ?: NULL } catch (_: SecurityException) { NULL }
+
+    /** 내보내기 files.txt 에 적는 앱 버전 */
+    fun appVersion(ctx: Context): String {
+        val a = appInfo(ctx)
+        return "${a.optString("version_name", "?")}(${a.optLong("version_code", -1)})"
+    }
 
     @Suppress("DEPRECATION")
     private fun appInfo(ctx: Context): JSONObject {

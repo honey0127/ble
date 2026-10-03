@@ -21,6 +21,7 @@ import com.knu.blechprobe.model.Mode
 import com.knu.blechprobe.model.RunType
 import com.knu.blechprobe.model.StatRow
 import com.knu.blechprobe.model.UiState
+import java.io.File
 import java.util.Locale
 import kotlin.math.ceil
 
@@ -36,13 +37,19 @@ private const val STALE_S = 5.0
  *   dup      rows ÷ 고유 seq.  타이밍 모델 진단값
  */
 @Composable
-fun RecordScreen(collector: Collector, permGranted: Boolean, onRequestPerms: () -> Unit) {
+fun RecordScreen(
+    collector: Collector, permGranted: Boolean, onRequestPerms: () -> Unit, onShare: (File) -> Unit,
+) {
     var ui by remember { mutableStateOf(collector.snapshot()) }
     // Activity 가 다시 만들어져도 입력값은 측정기(ViewModel 쪽)에서 되살린다
     var tag by remember { mutableStateOf(collector.tag) }
     var mode by remember { mutableStateOf(collector.mode) }
     var form by remember { mutableStateOf(collector.form) }
     var notice by remember { mutableStateOf("") }
+    var rawExt by remember { mutableStateOf(collector.rawExtended) }
+    var exporting by remember { mutableStateOf(false) }
+    // 측정이 끝날 때마다(그리고 내보낸 뒤) 날짜 목록을 다시 읽는다
+    val days = remember(ui.running, exporting) { collector.exportDays() }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -93,7 +100,28 @@ fun RecordScreen(collector: Collector, permGranted: Boolean, onRequestPerms: () 
                     enabled = !ui.running,
                     modifier = Modifier.fillMaxWidth()
                 )
+                if (mode == Mode.RAW) {
+                    FilterChip(
+                        selected = rawExt, enabled = !ui.running,
+                        onClick = { rawExt = !rawExt; collector.rawExtended = rawExt },
+                        label = { Text((if (rawExt) "✓ " else "") + "확장 광고 포함 (TAG 와 같은 스캔)") },
+                    )
+                    Text(
+                        if (rawExt) "B1·B9 확인용. 이 런은 9/22 A3 측정과 비교하지 않는다"
+                        else "기본: 레거시만 — 9/22 A3 측정과 같은 설정",
+                        fontSize = 11.sp, color = if (rawExt) Warn else Muted,
+                    )
+                }
             }
+        }
+
+        ui.auto?.let { a ->
+            PreflightSection(
+                a, ui.manual, ui.blockers, personRun = mode == Mode.TAG && form.runType.blockInS != null,
+                onManual = { collector.manual = it },
+                onTestBeep = { collector.testBeep() },
+                onBeepHeard = { collector.confirmBeep() },
+            )
         }
 
         /* 시작 / 정지 */
@@ -109,7 +137,7 @@ fun RecordScreen(collector: Collector, permGranted: Boolean, onRequestPerms: () 
                     notice = ""
                     if (!collector.start()) notice = collector.consumeNotice()
                 },
-                enabled = !ui.running,
+                enabled = !ui.running && ui.blockers.isEmpty(),
                 modifier = Modifier.weight(2f).height(52.dp)
             ) { Text(if (mode == Mode.TAG) "런 시작 (${form.runType.countdownS}초 뒤 기록)" else "시작", fontSize = 16.sp) }
 
@@ -132,14 +160,14 @@ fun RecordScreen(collector: Collector, permGranted: Boolean, onRequestPerms: () 
         if (notice.isNotEmpty()) Notice(notice, Color(0xFFFEF2F2))
 
         /* 끝난 런 표시 — 런이 끝난 뒤에만 폰을 만진다 */
-        if (ui.canFlag) FlagPanel(ui.lastFlag) { valid, reason ->
-            notice = if (collector.flagLastRun(valid, reason))
+        if (ui.canFlag) FlagPanel(ui.lastFlag) { valid, reasons ->
+            notice = if (collector.flagLastRun(valid, reasons))
                 "표시함: ${if (valid) "유효" else "무효"}" else "표시하지 못했습니다."
         }
 
         Text(
             "스캔 시작 여유: ${collector.startBudget()} / $START_LIMIT  " +
-                    "(30초에 5회 제한 — 재시작 버튼을 습관적으로 누르지 말 것)",
+                    "(30초에 5회 — AOSP 규칙. 재시작 버튼을 습관적으로 누르지 말 것)",
             fontSize = 11.sp, color = Muted
         )
 
@@ -148,7 +176,7 @@ fun RecordScreen(collector: Collector, permGranted: Boolean, onRequestPerms: () 
             Checks(ui)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Stat("경과", String.format(Locale.US, "%.1f s", ui.elapsedSec))
-                Stat("rows", ui.totalRows.toString())
+                Stat("rows", if (ui.blind) "가림" else ui.totalRows.toString())
                 Stat("events", ui.eventRows.toString())
                 Stat("파일", ui.fileName.take(22))
             }
@@ -160,10 +188,14 @@ fun RecordScreen(collector: Collector, permGranted: Boolean, onRequestPerms: () 
 
         /* 채널별 표 */
         Section(if (mode == Mode.BEACON) "채널별 현황" else "수신 현황") {
-            Header()
-            ui.rows.forEach { RowLine(it) }
-            if (ui.rows.isEmpty()) {
-                Text("아직 수신된 패킷이 없습니다.", fontSize = 12.sp, color = Muted)
+            if (ui.blind) {
+                Text("결과는 런을 유효/무효로 표시한 뒤 보인다 (측정 중에도 가린다)", fontSize = 12.sp, color = Muted)
+            } else {
+                Header()
+                ui.rows.forEach { RowLine(it) }
+                if (ui.rows.isEmpty()) {
+                    Text("아직 수신된 패킷이 없습니다.", fontSize = 12.sp, color = Muted)
+                }
             }
             // seq·채널 지표는 우리 비콘에만 의미가 있다
             if (mode == Mode.BEACON) Text(
@@ -173,6 +205,14 @@ fun RecordScreen(collector: Collector, permGranted: Boolean, onRequestPerms: () 
                         "back = seq 역행 횟수. 0이 아니면 T2 확인 필요",
                 fontSize = 11.sp, color = Muted, lineHeight = 15.sp
             )
+        }
+
+        if (!ui.running) ExportSection(days, exporting) { day ->
+            exporting = true
+            collector.exportDay(day) { zip, err ->
+                exporting = false
+                if (zip != null) { notice = "묶음: ${zip.name}"; onShare(zip) } else notice = err
+            }
         }
     }
 }
@@ -213,8 +253,9 @@ private fun RunPanel(rt: RunType, t: Double) {
 /** 점검 표시: 태그가 끊기면 '마지막 수신'이 빨개진다 */
 @Composable
 private fun Checks(ui: UiState) = Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-    Stat("pkt/s", String.format(Locale.US, "%.1f", ui.pktPerSec))
-    Stat("마지막 RSSI", ui.lastRssi?.toString() ?: "-")
+    // 결과 값은 표시 전까지 가린다. '마지막 수신'은 결과가 아니라 태그가 살아 있는지 보는 절차 점검이다
+    Stat("pkt/s", if (ui.blind) "가림" else String.format(Locale.US, "%.1f", ui.pktPerSec))
+    Stat("마지막 RSSI", if (ui.blind) "가림" else ui.lastRssi?.toString() ?: "-")
     Stat("광고", when (ui.lastLegacy) { true -> "legacy"; false -> "확장"; null -> "-" })
     val since = ui.sinceLastSec
     Stat(
@@ -222,30 +263,6 @@ private fun Checks(ui: UiState) = Row(Modifier.fillMaxWidth(), horizontalArrange
         since?.let { String.format(Locale.US, "%.1f s 전", it) } ?: "-",
         if (ui.running && since != null && since > STALE_S) Warn else Ink,
     )
-}
-
-/** 끝난 런에 유효/무효 표시. 무효면 이유를 적는다 (예: 사람이 늦게 움직임) */
-@Composable
-private fun FlagPanel(lastFlag: String?, onFlag: (Boolean, String) -> Unit) {
-    var reason by remember { mutableStateOf("") }
-    Column(
-        Modifier.fillMaxWidth().background(Color(0xFFF1F5F9), RoundedCornerShape(8.dp)).padding(10.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        Text(
-            "방금 런 표시" + (lastFlag?.let { " — 현재: ${if (it == "valid") "유효" else "무효"}" } ?: " — 아직 안 함"),
-            fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-        )
-        OutlinedTextField(
-            value = reason, onValueChange = { reason = it }, singleLine = true,
-            label = { Text("이유 (무효일 때)  예: 사람이 5초 늦게 들어옴") },
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { onFlag(true, reason) }, modifier = Modifier.weight(1f)) { Text("유효") }
-            OutlinedButton(onClick = { onFlag(false, reason) }, modifier = Modifier.weight(1f)) { Text("무효") }
-        }
-    }
 }
 
 @Composable private fun Header() = Row(Modifier.fillMaxWidth()) {

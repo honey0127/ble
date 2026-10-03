@@ -18,7 +18,7 @@ M4 채널 역산 점검 — 받은 시각(ts_nanos)이 스캐너의 채널별 �
 """
 import sys
 from collections import defaultdict
-from _common import read_csv, num, sibling, scan_start_ns
+from _common import read_csv, read_meta, num, sibling, scan_start_ns, scan_desc
 
 NBIN = 60   # 3D 주기를 60칸으로 접는다 → 한 채널 구간 = 20칸
 
@@ -60,6 +60,13 @@ def main(path, dwell, bin_s):
     rel = {ch: [(t - base) / 1e9 for t in v] for ch, v in by_ch.items()}
 
     print(f"\n파일 {path}   events {ev_path or '없음'}")
+    meta = read_meta(sibling(path, "meta", "json"))
+    sc = (meta or {}).get("scan") or {}
+    print(f"스캔 설정 {scan_desc(meta) or '(meta 없음)'}")
+    if meta and not (sc.get("legacy") is False and sc.get("phy") == "LE_1M"):
+        print("  ! TAG 와 스캔 설정이 다르다 (TAG = legacy=False, phy=LE_1M) — 이 런의 M4 결과는 TAG 측정에 옮길 수 없다")
+    flag = next((e for e in reversed(ev) if e.get("event") == "run_flag"), None)
+    print(f"런 표시 {flag['value'] + ' ' + flag.get('detail', '') if flag else '없음'}")
     for ch, v in sorted(rel.items()):
         print(f"  ch{ch}: {len(v)}행, 스캔 시작 후 {min(v):.1f}~{max(v):.1f}s")
 

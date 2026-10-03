@@ -29,6 +29,8 @@ data class Sample(
     val svcDataUuids: String = "",
     val svcUuids: String = "",
     val mfgIds: String = "",
+    /** RAW 만: ScanRecord.getBytes() 원본 hex. 레거시 광고는 뒤가 0 으로 채워져 있을 수 있다 */
+    val advHex: String = "",
 )
 
 /** events_<stamp>.csv 한 행의 핵심. 상태 스냅샷 열은 CSV 에만 있다 */

@@ -15,6 +15,7 @@ analyze.py 는 BEACON 전용이라 RAW CSV 에는 쓸 수 없다. 이 스크립�
 """
 import sys
 import csv
+from _common import read_meta, sibling
 
 
 def main(path):
@@ -34,6 +35,10 @@ def main(path):
     if not rows:
         print("파싱된 행이 없습니다. RAW 모드 CSV 가 맞는지 확인하세요.")
         return
+
+    meta = read_meta(sibling(path, "meta", "json"))
+    if meta and (meta.get("scan") or {}).get("raw_extended"):
+        print("\n! '확장 광고 포함' RAW 다 — 스캔 설정이 9/22 와 달라 A3 비교에 쓰지 않는다 (B1·B9 확인용)")
 
     rows.sort(key=lambda x: x["el"])
     dur_s = (rows[-1]["el"] - rows[0]["el"]) / 1000.0

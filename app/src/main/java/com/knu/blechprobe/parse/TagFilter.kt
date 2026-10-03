@@ -11,6 +11,19 @@ import com.knu.blechprobe.model.ServiceData
  */
 val TAG_SERVICE_UUIDS: List<ParcelUuid> = listOf(0xFD5A, 0xFD59).map { uuid16(it) }
 
+private val HEX = "0123456789abcdef".toCharArray()
+
+/** 바이트 → 소문자 hex. 패킷마다 부르므로 String.format 을 쓰지 않는다 */
+fun toHex(b: ByteArray?): String {
+    if (b == null) return ""
+    val out = CharArray(b.size * 2)
+    for (i in b.indices) {
+        val v = b[i].toInt() and 0xFF
+        out[i * 2] = HEX[v ushr 4]; out[i * 2 + 1] = HEX[v and 0x0F]
+    }
+    return String(out)
+}
+
 private fun uuid16(v: Int): ParcelUuid =
     ParcelUuid.fromString(String.format("0000%04X-0000-1000-8000-00805F9B34FB", v))
 
@@ -20,7 +33,7 @@ object TagFilter {
         if (record == null) return null
         for (u in TAG_SERVICE_UUIDS) {
             val bytes = record.getServiceData(u) ?: continue
-            return ServiceData(shortUuid(u), bytes.joinToString("") { String.format("%02x", it.toInt() and 0xFF) })
+            return ServiceData(shortUuid(u), toHex(bytes))
         }
         return null
     }

@@ -47,6 +47,38 @@ def pct(values, q):
     return v[i]
 
 
+AD_TYPES = {
+    0x01: "Flags", 0x02: "UUID16(일부)", 0x03: "UUID16", 0x06: "UUID128(일부)", 0x07: "UUID128",
+    0x08: "이름(짧은)", 0x09: "이름", 0x0A: "TxPower", 0x16: "서비스데이터16", 0x20: "서비스데이터32",
+    0x21: "서비스데이터128", 0xFF: "제조사데이터",
+}
+
+
+def parse_ad(hexstr):
+    """ScanRecord.getBytes() hex → [(type, 이름, data_hex)]. 길이 0 이면 끝(뒤는 0 채움)"""
+    try:
+        b = bytes.fromhex(hexstr or "")
+    except ValueError:
+        return []
+    out, i = [], 0
+    while i < len(b):
+        n = b[i]
+        if n == 0 or i + 1 + n > len(b):
+            break
+        t, data = b[i + 1], b[i + 2:i + 1 + n]
+        out.append((t, AD_TYPES.get(t, f"0x{t:02X}"), data.hex()))
+        i += 1 + n
+    return out
+
+
+def scan_desc(meta):
+    """meta 의 스캔 설정 한 줄. meta 가 없으면 None"""
+    if not meta or not meta.get("scan"):
+        return None
+    s = meta["scan"]
+    return f"legacy={s.get('legacy')} phy={s.get('phy')} raw_extended={s.get('raw_extended')}"
+
+
 def scan_start_ns(events):
     """events 의 scan_start 행 detail 'pre_ns=.. post_ns=..' 에서 post_ns. 없으면 None"""
     for e in events:

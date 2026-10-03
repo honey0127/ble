@@ -70,7 +70,7 @@ Phase 0 측정에는 지장이 없다.
 
 | 파일 | 컬럼 |
 |---|---|
-| `raw_<stamp>.csv` | `rx_wall_ms,rx_elapsed_ms,address,rssi,name,tag,ts_nanos,svc_data_uuids,svc_uuids,mfg_ids` |
+| `raw_<stamp>.csv` | `rx_wall_ms,rx_elapsed_ms,address,rssi,name,tag,ts_nanos,svc_data_uuids,svc_uuids,mfg_ids,is_legacy,primary_phy,secondary_phy,adv_sid,adv_hex` |
 | `beacon_<stamp>.csv` | `rx_wall_ms,rx_elapsed_ms,beacon_id,channel_id,seq,rssi,tx_uptime_ms,tx_power_dbm,tag,ts_nanos,address` |
 | `tag_<stamp>.csv` | `rx_wall_ms,rx_elapsed_ms,ts_nanos,address,rssi,is_legacy,primary_phy,secondary_phy,adv_sid,svc_uuid,svc_data_hex,scan_seq,cond` (→ 9장) |
 | `events_<stamp>.csv` | 폰 상태·런 이벤트 로그 (→ 4.1) |
@@ -92,8 +92,11 @@ Phase 0 측정에는 지장이 없다.
   전달 지연 제외"는 근거 없는 서술이었다. `elapsedRealtimeNanos` 와 같은 시계라
   이벤트 CSV 와 그대로 맞댈 수 있다. `rx_elapsed_ms` 는 콜백이 불린 시각이다.
   패킷 간격·M4 분석의 기준 시각으로 쓰되, 두 시각의 차이 자체가 확인 대상이다
-- `svc_data_uuids`, `svc_uuids`, `mfg_ids` (RAW, 9/30) — 광고에 든 서비스 데이터 UUID ·
+- `svc_data_uuids`, `svc_uuids`, `mfg_ids` (RAW, 9/29) — 광고에 든 서비스 데이터 UUID ·
   광고 서비스 UUID · 제조사 ID (`|` 로 이음). B1(태그가 어떤 식별자로 광고하나) 찾기용 (10장)
+- `is_legacy`, `primary_phy`, `secondary_phy`, `adv_sid`, `adv_hex` (RAW, 10/3) — 광고 형식과
+  `ScanRecord.getBytes()` 원본. 레거시 광고는 원본 뒤가 0 으로 채워져 있을 수 있다.
+  RAW '확장 광고 포함'(9.1)으로 받아야 확장 광고가 보인다 — B1·B9 를 한 번에 가른다
 - `address` (BEACON) — 송신 MAC. T4c 에서 nRF Sniffer 캡처와 대조하고,
   비콘이 여러 대가 되면 `beacon_id` 와 교차 확인하는 데 쓴다
 
@@ -212,8 +215,10 @@ A3 는 현재 **미검증**이다. 재측정부터는 앱이 상태를 `events_<
 
 ### 스캔 재시작 제한
 
-`startScan` 은 30초에 5회를 넘기면 시스템이 **조용히** 결과를 끊는다. 에러도 안 난다.
-그래서 앱은 이렇게 만들었다.
+`startScan` 을 30초에 5회 넘게 부르면 시스템이 그 스캔을 **시작하지 않는다.** 에러 콜백 없이
+로그("App ... is scanning too frequently")만 남는다. 공식 문서가 아니라 AOSP 소스
+(Bluetooth `AppScanStats` 의 `NUM_SCAN_DURATIONS_KEPT=5`, `EXCESSIVE_SCANNING_PERIOD_MS=30 s`,
+Android 7+)의 규칙이다 [AOSP 소스] — 제조사가 바꿨을 수 있다. 그래서 앱은 이렇게 만들었다.
 
 - 스캔은 측정(런)마다 한 번 시작해 끝까지 유지한다. **런 도중에는 재시작하지 않는다** —
   필터 없이 켜 두고 모드에 따라 기록 대상만 고른다. 모드는 측정 중에 바꿀 수 없다
@@ -248,7 +253,7 @@ Galaxy / One UI 기준이다. 버전에 따라 메뉴 이름이 조금씩 다르
 ## 8. 알려진 한계
 
 - **빌드:** 커밋 `79bd045` 기준으로 실기기에서 `assembleDebug` 와 실행을 확인했다.
-  9/27(이벤트 로그·ViewModel)·9/29(패키지 분리·TAG 모드)·9/30(RAW 식별자 컬럼·UI 정리) 변경은 **아직 실기기 빌드 전**이다.
+  9/27(이벤트 로그·ViewModel)·9/29(패키지 분리·TAG 모드)·9/29(RAW 식별자 컬럼·UI 정리)·10/3(RAW 확장 포함·내보내기·표시 사유·시작 전 점검) 변경은 **아직 실기기 빌드 전**이다.
   작업 환경에 Android SDK 가 없어, API 36 프레임워크(Robolectric `android-all`)와
   Compose 공통 API 에 대해 Kotlin 컴파일 검사만 통과시켰다. AndroidX
   activity/lifecycle/core 는 공개 시그니처를 옮긴 스텁으로 대신했다
@@ -269,7 +274,8 @@ Galaxy / One UI 기준이다. 버전에 따라 메뉴 이름이 조금씩 다르
 
 | 모드 | legacy | PHY | 이유 |
 |---|---|---|---|
-| RAW | `true` | 지정 안 함 | 9/22 A3 측정과 같아야 재측정 결과를 비교할 수 있다 |
+| RAW (기본) | `true` | 지정 안 함 | 9/22 A3 측정과 같아야 재측정 결과를 비교할 수 있다 |
+| RAW + 확장 광고 포함 | `false` | `PHY_LE_1M` | TAG 와 같은 설정. 태그 도착 날 B1(다른 UUID?)·B9(확장 광고?)를 가르려고. **9/22 와 비교하지 않는다** (`meta.scan.raw_extended`=true, `raw_check.py` 가 경고) |
 | TAG | `false` | `PHY_LE_1M` | `setLegacy` 기본값 true 는 레거시 광고만 돌려준다 [공식] — 태그가 확장 광고를 쓰면 안 보인다(B9). `setPhy` 는 legacy=false 일 때만 쓰이고 기본값은 문서에 없다 [공식]. `PHY_LE_ALL_SUPPORTED` 면 Coded PHY 도 스캔해 스캔 창 시간표가 바뀔 수 있어 [추론] 1M 으로 고정 |
 | BEACON | `false` | `PHY_LE_1M` | TAG 와 같게 — M4 결과를 TAG 측정에 옮기려면 스캔 설정이 같아야 한다 |
 
@@ -312,7 +318,7 @@ legacy=false 여도 레거시 광고는 그대로 받는다. `meta_<stamp>.json`
 - 카운트다운 10 초 동안 조작자는 정해진 자리로 물러난다. 이 구간도 기록하지만 채점에서 뺀다
 - 사람이 움직이는 몇 초도 채점에서 뺀다 — 몇 초로 할지는 Phase 1 전에 고정
 - 화면 맨 위에 큰 타이머와 안내 문구가 뜬다(멀리서 보이게)
-- 런이 끝나면 **유효 / 무효** 를 표시한다(무효면 이유). `run_flag` 이벤트와 meta 의
+- 런이 끝나면 **유효 / 무효** 를 표시한다 (9.7). `run_flag` 이벤트와 meta 의
   `result.flag` 에 남는다. 표시는 런이 끝난 뒤에만 한다
 
 ### 9.4 점검 표시
@@ -348,6 +354,55 @@ ui/        RecordScreen(① 측정) TagFormSection
 
 새 라이브러리는 넣지 않았다. ② 라이브 그래프 · ③ 찾기 · ④ 재생 화면은 GO 이후.
 
+### 9.7 유효/무효 표시 — 결과를 보지 않고 절차로만
+
+"잘 안 나온 런을 뺀 것 아닌가"라는 질문에 답하려고 만든 규칙이다.
+
+- **측정 중과 표시 전에는 pkt/s·RSSI·rows·수신 표를 가린다.** '마지막 수신 N s 전'과
+  `광고` legacy/확장은 보인다 — 결과가 아니라 태그가 살아 있는지 보는 절차 점검이라서다
+- **무효는 절차 사유 칩을 하나 이상 골라야 누를 수 있다** (여러 개 가능). 사유 코드:
+
+  | 코드 | 칩 |
+  |---|---|
+  | `move_timing` | 알림음과 다르게 움직임 |
+  | `touched` | 폰·태그를 건드림 |
+  | `intruder` | 계획 밖 사람·물체 |
+  | `setup` | 배치·거리·높이 오류 |
+  | `no_beep` | 알림음을 못 들음 |
+  | `device` | 폰·앱·태그 이상 |
+
+- 유효는 사유 없이 누른다 (칩을 고른 상태에서는 유효가 눌리지 않는다)
+- **한 번 표시하면 바꿀 수 없다.** 결과를 본 뒤 표시를 바꾸는 일을 막는다
+- `run_flag` 의 `detail` = 사유 코드(`|` 로 이음), meta `result.flag_reasons` = 코드 배열
+
+### 9.8 시작 전 점검
+
+측정 중이 아닐 때 화면에 뜬다. 그 런을 시작한 순간의 값이 meta `preflight` 에 남는다.
+
+| 앱이 읽음 | 사람이 확인 |
+|---|---|
+| 절전 모드 · 배터리 최적화 제외 · 충전 · 알람 음량 · 방해 금지 · Wi-Fi(기록만) | SmartThings 종료 · 워치·버즈 연결 끊기 · 태그 일반 모드 · 알림음 시험 |
+
+**사람 가림 런은 다음 중 하나면 시작 버튼이 막힌다** — 알림음이 곧 가림 시각의 정답이라,
+소리가 안 나면 그 런은 정답이 없다.
+
+- 알람 음량 0
+- 방해 금지가 완전 무음 (`INTERRUPTION_FILTER_NONE`: 전화 외 모든 오디오 스트림을 끈다 [공식])
+- 알림음 시험 미확인 — [알림음 시험]을 눌러 들리면 [들렸으면 누르기]. 알람 음량이 바뀌면 다시 해야 한다
+
+사람이 확인하는 항목은 앱을 다시 켜면 처음부터 다시 확인한다. 나머지 런은 막지 않고 보여 주기만 한다.
+
+### 9.9 하루치 내보내기
+
+앱을 지우면 앱 전용 저장소의 CSV 도 지워진다. 그날 측정이 끝나면 화면 맨 아래
+**측정 내보내기**에서 날짜를 눌러 zip 으로 묶고 공유 시트(드라이브·메일·PC 등)로 보낸다.
+
+- zip = 그날(`<yyyyMMdd>_` stamp) 의 `raw_/beacon_/tag_/events_/meta_` 파일 전부 + `files.txt`
+- `files.txt` = 파일명 · 바이트 · **sha256**, 머리에 내보낸 시각·기종·앱 버전.
+  개발일/평가일을 나눌 때 "그날 그 파일"이라는 증거가 된다 (파일이 바뀌면 sha256 이 달라진다)
+- 측정 중에는 내보내지 않는다 (쓰는 중인 파일이 있다). zip 은 `files/exports/` 에 남고,
+  FileProvider 로 그 폴더만 공유한다
+
 ---
 
 ## 10. 분석 스크립트 (`scripts/`)
@@ -360,9 +415,9 @@ ui/        RecordScreen(① 측정) TagFormSection
 | `raw_check.py <raw.csv>` | A3 1단계 | 0 인 분이 있나 (콜백 생존) |
 | `raw_breakdown.py <raw.csv> [분 MAC]` | A3 2·4단계 | 급락이 수신기 측인가 환경 측인가, 고정 MAC 배율 |
 | `events_view.py <events.csv>` | A3 3단계 | 10초 처리량과 상태 변화를 시간순으로. 가장 큰 낙폭(▼)과 그 ±20초 이벤트 |
-| `b1_find.py <raw.csv>` | B1 | 태그를 폰에 붙이고 RAW 1분 → 가장 센 기기의 식별자가 TAG 필터(FD5A/FD59)와 같은가 |
-| `tag_check.py <tag.csv> [--margin 3]` | TAG 런마다 | 수집량·공백, legacy/PHY(B9), 주소 교체(T2), 수신 간격, 콜백 지연, 구간별 RSSI |
-| `m4_channel.py <beacon.csv> [--dwell D]` | M4 | FIXED 채널 런의 받은 시각이 채널 시간대에 몰리나. D 탐색, 경과 시간별 적중률 |
+| `b1_find.py <raw.csv>` | B1·B9 | 태그를 폰에 붙이고 **RAW 확장 포함** 1분 → 가장 센 기기의 식별자가 TAG 필터(FD5A/FD59)와 같은가, legacy/확장 비율, 광고 원본 AD 구조 |
+| `tag_check.py <tag.csv> [--margin 3]` | TAG 런마다 | 수집량·공백, legacy/PHY(B9), 주소 교체(T2), 수신 간격, 콜백−ts_nanos 시각 차이, 구간별 RSSI, 표시·사유·시작 전 점검·스캔 설정 |
+| `m4_channel.py <beacon.csv> [--dwell D]` | M4 | FIXED 채널 런의 받은 시각이 채널 시간대에 몰리나. D 탐색, 경과 시간별 적중률. **스캔 설정이 TAG 와 다르면 경고** |
 
 합성 데이터로 확인한 것 (정답을 심어 두고 찾는지 봤다):
 
@@ -372,6 +427,7 @@ ui/        RecordScreen(① 측정) TagFormSection
 - `m4_channel` — D=4.096 s 순환을 4.097 s 로 찾음, 적중률 0.99, 채널 위상이 1/3 씩 어긋남.
   **대조군**(시간대와 무관한 수신)은 0.40 — D 를 탐색하면 우연만으로도 0.4 가 나온다
 
-B1 찾는 법: 태그를 폰 뒷면에 붙인 채 RAW 1분 → `b1_find.py`. 태그를 멀리 치웠다가 다시
-붙여 한 번 더 받아 같은 줄이 맨 위면 태그다. RAW 는 legacy 스캔이라 **확장 광고만 쓰는
-태그는 여기 안 나온다** — 그때 TAG 모드에서도 안 잡히면 B9 쪽이다.
+B1·B9 찾는 법: 태그를 폰 뒷면에 붙인 채 **RAW '확장 광고 포함'** 으로 1분 → `b1_find.py`.
+가장 센 줄의 서비스 데이터 UUID(B1)와 legacy 비율(B9)을 본다. 태그를 멀리 치웠다가 다시
+붙여 한 번 더 받아 같은 줄이 맨 위면 태그다. 기본(레거시만) RAW 로 받으면 확장 광고만 쓰는
+태그는 안 나오고, 스크립트가 그렇다고 경고한다.

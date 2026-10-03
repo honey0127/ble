@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 내보내기 zip 만 공유한다 (Exporter → FileProvider). ble_logs 원본은 노출하지 않는다 -->
+<paths>
+    <external-files-path name="exports" path="exports/" />
+</paths>
